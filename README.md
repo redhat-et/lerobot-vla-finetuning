@@ -1,16 +1,82 @@
-## INSPECTION OF CLUSTER'S NODE GPU HARDWARE AND
-## GENERATING requitements.txt FOR CONTAINER PACKAGES
+# LeRobot VLA Fine-Tuning Container for OpenShift
 
-## LOGIN TO THE CLUSTER AND INSPECT HARDWARE PROPERTIES
-## LIKE POOL/DRIVER/CUDA_MAX/COMPUTE_CAP
+> [!WARNING]
+> **Experimental / Work in Progress**
+>
+> This setup is not finished yet and has not been fully validated for production use.
+> The resolver logic, package versions, container dependencies, GPU runtime behavior,
+> and OpenShift deployment flow may still change.
+
+This repository contains an experimental workflow for building a Red Hat UBI-based
+container image for LeRobot VLA fine-tuning.
+
+The workflow:
+
+1. Inspects the GPU hardware available in the OpenShift cluster.
+2. Generates a `versions.env` manifest with exact compatible package versions.
+3. Builds the container image locally with Podman.
+4. Produces an image intended to run on an OpenShift GPU node.
+
+## Current status
+
+Implemented:
+
+- GPU node inspection in OpenShift.
+- Automatic generation of exact Python, CUDA, PyTorch, TorchVision, and LeRobot versions.
+- Red Hat UBI-based container image.
+- GPU-enabled PyTorch installation.
+- LeRobot training dependencies.
+- Podman-based local image build.
+
+Still experimental:
+
+- Full end-to-end fine-tuning validation.
+- OpenShift deployment manifests.
+- Multi-GPU and distributed training.
+- Persistent dataset and model storage.
+- Final dependency minimization.
+- Production security and reproducibility checks.
+
+## Prerequisites
+
+The following tools are expected to be available:
+
+- `oc`
+- `podman`
+- `bash`
+- Python 3
+- Access to an OpenShift cluster with NVIDIA GPU nodes
+
+## 1. Inspect GPU nodes in OpenShift
+
+Log in to the cluster and inspect the GPU pool, model, memory, driver, maximum CUDA
+version, and compute capability:
+
 ```bash
 oc get nodes -l nvidia.com/gpu.present=true -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.gpu-pool-size}{"\t"}{.metadata.labels.nvidia\.com/gpu\.product}{"\t"}{.metadata.labels.nvidia\.com/gpu\.memory}{"\t"}{.metadata.labels.nvidia\.com/gpu\.count}{"\t"}{.metadata.labels.nvidia\.com/cuda\.driver-version\.full}{"\t"}{.metadata.labels.nvidia\.com/cuda\.runtime-version\.full}{"\t"}{.metadata.labels.nvidia\.com/gpu\.compute\.major}{"\t"}{.metadata.labels.nvidia\.com/gpu\.compute\.minor}{"\n"}{end}' | awk -F'\t' 'BEGIN{print "NODE\tPOOL\tMODEL\tVRAM_PER_GPU_MB\tCOUNT\tTOTAL_VRAM_GB\tDRIVER\tCUDA_MAX\tCOMPUTE_CAP"} {printf "%s\t%s\t%s\t%s\t%s\t%.0f\t%s\t%s\t%s.%s\n", $1,$2,$3,$4,$5,($4*$5)/1024,$6,$7,$8,$9}'
 ```
 
-## GENERATING MANIFEST FILE FOR CONTAINER BUILD SETUP
+Example values used below:
+
+```text
+GPU model: NVIDIA L40S
+Driver: 580.126.20
+CUDA maximum: 13.0
+Compute capability: 8.9
+GPU pool: xlarge
+```
+
+## 2. Generate `versions.env`
+
+Make the resolver executable:
+
 ```bash
 chmod +x resolve_build_manifest_lerobot.sh
+```
 
+Generate the version manifest:
+
+```bash
 ./resolve_build_manifest_lerobot.sh \
   --cuda-max 13.0 \
   --compute-cap 8.9 \
@@ -18,16 +84,49 @@ chmod +x resolve_build_manifest_lerobot.sh
   --driver 580.126.20 \
   --pool xlarge \
   --lerobot-ref main \
-  -o versions.env
+  --out versions.env
 ```
 
+The generated file contains the exact versions selected for the build, for example:
 
-## BUILD CONTAINER IMAGE
+```text
+PYTHON_VERSION=...
+CUDA_TOOLKIT_VERSION=...
+PYTORCH_CUDA_BRANCH=...
+TORCH_VERSION=...
+TORCHVISION_VERSION=...
+LEROBOT_VERSION=...
+```
+
+Review the manifest before building:
+
+```bash
+cat versions.env
+```
+
+## 3. Load the version manifest
+
 ```bash
 set -a
 source versions.env
 set +a
+```
 
+Optional verification:
+
+```bash
+printf 'Python: %s\n' "$PYTHON_VERSION"
+printf 'CUDA branch: %s\n' "$PYTORCH_CUDA_BRANCH"
+printf 'PyTorch: %s\n' "$TORCH_VERSION"
+printf 'TorchVision: %s\n' "$TORCHVISION_VERSION"
+printf 'LeRobot: %s\n' "$LEROBOT_VERSION"
+```
+
+## 4. Build the container image
+
+The example below installs LeRobot training dependencies for the `pi` policy:
+
+```bash
 podman build \
   --build-arg UBI_PYTHON_IMAGE="$UBI_PYTHON_IMAGE" \
   --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
@@ -43,6 +142,81 @@ podman build \
   --build-arg GPU_SM="$GPU_SM" \
   --build-arg TARGET_ARCH="$TARGET_ARCH" \
   --build-arg LEROBOT_EXTRAS="training,pi" \
-  -f Containerfile \
-  -t lerobot-vla-finetuning:latest .
+  --file Containerfile \
+  --tag lerobot-vla-finetuning:latest \
+  .
 ```
+
+The final dot is the Podman build context. In the current setup it can be the local
+project directory containing the `Containerfile`.
+
+## 5. Verify the image
+
+List the built image:
+
+```bash
+podman images
+```
+
+Check the installed package versions:
+
+```bash
+podman run \
+  --rm \
+  lerobot-vla-finetuning:latest \
+  python -c '
+import importlib.metadata as metadata
+import torch
+import torchvision
+
+print("lerobot:", metadata.version("lerobot"))
+print("torch:", torch.__version__)
+print("torchvision:", torchvision.__version__)
+print("wheel CUDA runtime:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+'
+```
+
+During `podman build`, `torch.cuda.is_available()` may be `False` because the build
+container normally does not have access to the GPU.
+
+## 6. Run locally with an NVIDIA GPU
+
+This requires NVIDIA CDI support on the host:
+
+```bash
+podman run \
+  --rm \
+  --device='nvidia.com/gpu=all' \
+  lerobot-vla-finetuning:latest \
+  python -c '
+import torch
+
+print("CUDA available:", torch.cuda.is_available())
+print("device count:", torch.cuda.device_count())
+
+if torch.cuda.is_available():
+    print("device:", torch.cuda.get_device_name(0))
+    print("capability:", torch.cuda.get_device_capability(0))
+'
+```
+
+## Notes
+
+- `versions.env` is generated output and should contain exact selected versions.
+- The resolver may query external package sources when determining compatibility.
+- The container image is designed for GPU workloads, but the NVIDIA driver must remain
+  on the OpenShift node rather than inside the image.
+- The `LEROBOT_EXTRAS` argument controls which optional LeRobot components are installed.
+- The example uses `training,pi`; other policies may require different extras.
+- Do not treat the current image as production-ready until fine-tuning has been validated
+  end to end on the target OpenShift cluster.
+
+## Known limitations
+
+- No completed OpenShift Job or KubeFlow Pipeline manifest is included yet.
+- Dataset mounts, object storage, checkpoints, secrets, and Hugging Face authentication
+  are not configured here.
+- Image size and dependency selection may still be optimized.
+- The exact training command is not yet defined in this README.
+- Multi-GPU behavior has not yet been validated.
