@@ -41,3 +41,5 @@ out/
 npm-debug.log*
 yarn-debug.log*
 *.sqlite
+
+.secrets

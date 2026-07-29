@@ -147,9 +147,6 @@ podman build \
   .
 ```
 
-The final dot is the Podman build context. In the current setup it can be the local
-project directory containing the `Containerfile`.
-
 ## 5. Verify the image
 
 List the built image:
@@ -180,26 +177,45 @@ print("CUDA available:", torch.cuda.is_available())
 During `podman build`, `torch.cuda.is_available()` may be `False` because the build
 container normally does not have access to the GPU.
 
-## 6. Run locally with an NVIDIA GPU
-
-This requires NVIDIA CDI support on the host:
-
+## 6. Push container image to Quay.io
 ```bash
-podman run \
-  --rm \
-  --device='nvidia.com/gpu=all' \
-  lerobot-vla-finetuning:latest \
-  python -c '
-import torch
-
-print("CUDA available:", torch.cuda.is_available())
-print("device count:", torch.cuda.device_count())
-
-if torch.cuda.is_available():
-    print("device:", torch.cuda.get_device_name(0))
-    print("capability:", torch.cuda.get_device_capability(0))
-'
+podman push quay.io/<username>/lerobot-vla-finetuning:latest
 ```
+
+## 7. Create secrets
+```bash
+oc create secret docker-registry quay-pull-secret \
+  --docker-server=quay.io \
+  --docker-username='<QUAY_USERNAME>' \
+  --docker-password='<QUAY_ROBOT_TOKEN>' \
+  --docker-email='<EMAIL>'
+oc get secret quay-pull-secret
+
+oc create secret generic huggingface-credentials \
+  --from-literal=token='<HF_TOKEN>'
+oc get secret huggingface-credentials
+```
+
+## 8. Run smoke test
+```bash
+oc apply --dry-run=server -f ./k8s/storage-pvcs.yaml
+oc apply --dry-run=server -f ./k8s/download-job.yaml
+```
+
+## 9. Create PVC
+```bash
+oc apply -f ./k8s/storage-pvcs.yaml      # creating
+oc get pvc                               # checking
+```
+
+## 10. Run download job
+```bash
+oc apply -f ./k8s/download-job.yaml      # creating 
+oc get jobs                              # checking
+```
+
+The final dot is the Podman build context. In the current setup it can be the local
+project directory containing the `Containerfile`.
 
 ## Notes
 

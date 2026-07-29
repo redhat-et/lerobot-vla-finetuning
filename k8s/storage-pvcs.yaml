@@ -1,0 +1,49 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-base-models
+  labels:
+    app.kubernetes.io/part-of: vla-finetuning
+    app.kubernetes.io/component: model-storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3-csi
+  resources:
+    requests:
+      storage: 100Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-datasets
+  labels:
+    app.kubernetes.io/part-of: vla-finetuning
+    app.kubernetes.io/component: dataset-storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3-csi
+  resources:
+    requests:
+      # Verify the actual size of the selected dataset before downloading.
+      # This NVIDIA dataset can be very large; expand the claim if required.
+      storage: 200Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-finetuned-models
+  labels:
+    app.kubernetes.io/part-of: vla-finetuning
+    app.kubernetes.io/component: training-output
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3-csi
+  resources:
+    requests:
+      storage: 100Gi
