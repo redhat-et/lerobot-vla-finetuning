@@ -69,14 +69,10 @@ GPU pool: xlarge
 ## 2. Generate `versions.env`
 
 Make the resolver executable:
-
+Generate the version manifest:
 ```bash
 chmod +x resolve_build_manifest_lerobot.sh
-```
 
-Generate the version manifest:
-
-```bash
 ./resolve_build_manifest_lerobot.sh \
   --cuda-max 13.0 \
   --compute-cap 8.9 \
@@ -110,11 +106,7 @@ cat versions.env
 set -a
 source versions.env
 set +a
-```
 
-Optional verification:
-
-```bash
 printf 'Python: %s\n' "$PYTHON_VERSION"
 printf 'CUDA branch: %s\n' "$PYTORCH_CUDA_BRANCH"
 printf 'PyTorch: %s\n' "$TORCH_VERSION"
@@ -211,6 +203,12 @@ oc get pvc                               # checking
 ## 10. Run download job
 ```bash
 oc apply -f ./k8s/download-job.yaml      # creating 
+oc get jobs                              # checking
+```
+
+## 11. Run fine-tuning job
+```bash
+oc apply -f ./k8s/training-job.yaml      # creating 
 oc get jobs                              # checking
 ```
 

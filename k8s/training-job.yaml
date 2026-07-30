@@ -35,10 +35,18 @@ spec:
         - name: quay-pull-secret
 
       securityContext:
-        fsGroup: 0
+        # fsGroup: 0 was rejected by restricted-v2/restricted-v3 (group 0 =
+        # root, explicitly disallowed). Omit fsGroup entirely and let
+        # OpenShift auto-assign a valid GID from the namespace's allowed
+        # supplemental-groups range (check with:
+        #   oc get project <ns> -o jsonpath='{.metadata.annotations.openshift\.io/sa\.scc\.supplemental-groups}'
+        # ). If you need a specific fsGroup for PVC permission reasons, use
+        # a value from that range instead of an arbitrary number.
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
+        # Required by restricted-v3 -- must be explicitly false, not omitted.
+        hostUsers: false
 
       # Dataset preparation is performed before the GPU training container.
       # It uses the same LeRobot image because the conversion scripts must
@@ -160,7 +168,12 @@ spec:
 
               echo "Detected dataset version: ${DATASET_VERSION:-unknown}"
 
-              if [[ "${DATASET_VERSION}" == 3.0 || "${DATASET_VERSION}" == 3.0.* ]]; then
+              # LeRobot stores codebase_version WITH a leading "v" (e.g.
+              # "v2.1", "v3.0"), not a bare number -- strip it before
+              # comparing so this check actually matches real values.
+              DATASET_VERSION_NORMALIZED="${DATASET_VERSION#v}"
+
+              if [[ "${DATASET_VERSION_NORMALIZED}" == 3.0 || "${DATASET_VERSION_NORMALIZED}" == 3.0.* ]]; then
                 echo "Dataset is already compatible with LeRobot v3.0"
                 touch "${CONVERSION_MARKER}"
               else
@@ -199,7 +212,12 @@ spec:
                   or ""
               )
 
-              if not version.startswith("3.0"):
+              # Same fix as the bash pre-check above: LeRobot stores this
+              # with a leading "v" (e.g. "v3.0"), which never starts with
+              # the bare string "3.0" -- strip it before comparing.
+              version_normalized = version.lstrip("v")
+
+              if not version_normalized.startswith("3.0"):
                   raise SystemExit(
                       f"Dataset conversion did not produce version 3.0; "
                       f"detected: {version or 'unknown'}"
@@ -253,7 +271,94 @@ spec:
               print("Dataset preflight completed successfully")
               PY
 
+              echo "==> Checking for quantile (q01/q99) stats"
+
+              # IMPORTANT: this must run against the SAME on-cluster dataset
+              # copy used for training (DATASET_ROOT, on pvc-datasets) -- a
+              # local run of augment_dataset_quantile_stats on your own
+              # machine has NO effect here, since that's a completely
+              # separate physical copy of the dataset. Idempotent: skips the
+              # (slow) computation if q01/q99 are already present for both
+              # action and observation.state.
+              HAS_QUANTILES="$(
+                DATASET_ROOT="${DATASET_ROOT}" \
+                python - <<'PY'
+              import json
+              import os
+              from pathlib import Path
+
+              info_path = Path(os.environ["DATASET_ROOT"]) / "meta" / "stats.json"
+
+              if not info_path.exists():
+                  print("false")
+                  raise SystemExit(0)
+
+              with info_path.open() as stream:
+                  stats = json.load(stream)
+
+              required = ("action", "observation.state")
+              ok = all(
+                  isinstance(stats.get(feature), dict)
+                  and "q01" in stats[feature]
+                  and "q99" in stats[feature]
+                  for feature in required
+              )
+              print("true" if ok else "false")
+              PY
+              )"
+
+              if [[ "${HAS_QUANTILES}" == "true" ]]; then
+                echo "q01/q99 stats already present, skipping computation"
+              else
+                echo "==> Computing q01/q99 quantile stats (this can take a while)"
+                # Same package version as the conversion script above --
+                # module path matches lerobot 0.6.0's layout (no ".common.").
+                python -m lerobot.datasets.v30.augment_dataset_quantile_stats \
+                  --repo-id="${DATASET_REPO_ID}" \
+                  --root="${DATASET_ROOT}"
+
+                echo "==> Verifying quantile stats were actually written"
+                DATASET_ROOT="${DATASET_ROOT}" python - <<'PY'
+              import json
+              import os
+              import sys
+              from pathlib import Path
+
+              info_path = Path(os.environ["DATASET_ROOT"]) / "meta" / "stats.json"
+
+              with info_path.open() as stream:
+                  stats = json.load(stream)
+
+              required = ("action", "observation.state")
+              missing = [
+                  feature
+                  for feature in required
+                  if not (
+                      isinstance(stats.get(feature), dict)
+                      and "q01" in stats[feature]
+                      and "q99" in stats[feature]
+                  )
+              ]
+
+              if missing:
+                  # Known failure mode: augment_dataset_quantile_stats can
+                  # silently no-op on some lerobot versions/datasets --
+                  # https://github.com/huggingface/lerobot/issues/2189
+                  sys.exit(
+                      "q01/q99 still missing after running "
+                      "augment_dataset_quantile_stats for: " + ", ".join(missing)
+                  )
+
+              print("q01/q99 present for:", ", ".join(required))
+              PY
+              fi
+
           volumeMounts:
+            # Same mountPath as the download job (/workspace/models) --
+            # the model was downloaded with local_dir=MODEL_DIR directly
+            # under this mount point, so the on-disk layout relative to the
+            # volume root is "lerobot/pi05_base/...". Keep this path in sync
+            # with download-job.yaml's base-models mountPath.
             - name: base-models
               mountPath: /workspace/models
               readOnly: true
@@ -332,7 +437,7 @@ spec:
 
             - name: NORMALIZATION_MAPPING
               value: >-
-                {"ACTION":"MEAN_STD","STATE":"MEAN_STD","VISUAL":"IDENTITY"}
+                {"ACTION":"QUANTILES","STATE":"QUANTILES","VISUAL":"IDENTITY"}
 
             - name: HF_TOKEN
               valueFrom:
@@ -353,11 +458,18 @@ spec:
               RUN_NAME="${JOB_NAME}-${RUN_ID}"
               RUN_OUTPUT_DIR="${OUTPUT_ROOT}/${RUN_ID}"
 
+              # IMPORTANT: do NOT mkdir RUN_OUTPUT_DIR itself here.
+              # lerobot-train's cfg.validate() checks that output_dir does
+              # NOT already exist (unless --resume=true is passed) and
+              # raises FileExistsError otherwise -- pre-creating it ourselves
+              # was exactly what triggered that error. Only create the
+              # parent (OUTPUT_ROOT); lerobot-train creates RUN_OUTPUT_DIR
+              # itself when it starts.
               mkdir -p \
                 "${HOME}" \
                 "${HF_HOME}" \
                 "${HF_LEROBOT_HOME}" \
-                "${RUN_OUTPUT_DIR}"
+                "${OUTPUT_ROOT}"
 
               echo "============================================================"
               echo "LeRobot π0.5 fine-tuning"
@@ -373,9 +485,11 @@ spec:
 
               echo "==> Checking available disk space"
 
+              # RUN_OUTPUT_DIR doesn't exist yet at this point (see note
+              # above), so check space on its parent instead.
               df -h \
                 "${DATASET_ROOT}" \
-                "${RUN_OUTPUT_DIR}"
+                "${OUTPUT_ROOT}"
 
               echo "==> Checking LeRobot CLI options"
 
@@ -441,7 +555,7 @@ spec:
               echo "Batch size:           ${BATCH_SIZE}"
               echo "Workers:              ${NUM_WORKERS}"
               echo "Empty cameras:        1"
-              echo "Normalization:        MEAN_STD"
+              echo "Normalization:        ${NORMALIZATION_MAPPING}"
               echo "Freeze vision encoder: true"
               echo "Train expert only:     true"
               echo "Compile model:         true"
@@ -469,6 +583,13 @@ spec:
                 --wandb.enable=false
 
           volumeMounts:
+            # IMPORTANT: mounted at the SAME path the download job used
+            # (/workspace/models). The model was downloaded there with
+            # local_dir=MODEL_DIR directly under this mount point (see
+            # download-job.yaml), so the on-disk layout relative to the
+            # volume root is "lerobot/pi05_base/...". Mounting this same PVC
+            # at a different path here would break MODEL_DIR below. Keep
+            # this in sync with download-job.yaml's base-models mountPath.
             - name: base-models
               mountPath: /workspace/models
               readOnly: true
