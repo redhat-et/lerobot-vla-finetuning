@@ -81,6 +81,35 @@ spec:
             - name: CONVERSION_MARKER
               value: /workspace/data/nvidia/PhysicalAI-Robotics-Manipulation-SingleArm/panda-stack-platforms/.converted-v30
 
+            # Non-video, numeric features that need QUANTILES normalization
+            # (see policy.normalization_mapping below: VISUAL uses IDENTITY,
+            # which never consults dataset stats at all -- see
+            # lerobot/processor/normalize_processor.py). Change this for a
+            # future dataset with differently named action/state features;
+            # no script edits needed.
+            - name: QUANTILE_FEATURES
+              value: "action,observation.state"
+
+            # Which physical dataset camera maps to which of the model's
+            # camera INPUT SLOTS. The correspondence itself (e.g. "hand_camera
+            # is physically the left wrist, not the right") can only be
+            # supplied by a human -- but everything else (which slot names
+            # actually exist, how many there are, how many are left empty)
+            # is derived from ${MODEL_DIR}/config.json below and validated,
+            # not hardcoded. See the preflight step "Deriving camera
+            # rename_map / empty_cameras from the model config".
+            - name: CAMERA_MAP
+              value: >-
+                {"observation.images.world_camera":"observation.images.base_0_rgb","observation.images.hand_camera":"observation.images.left_wrist_0_rgb"}
+
+            # Written by this init container once camera requirements are
+            # validated; read by the trainer container below. Lives on the
+            # training-cache volume (mounted read/write in both containers),
+            # not on the dataset PVC, since it's pipeline handoff state, not
+            # dataset content.
+            - name: DERIVED_CAMERA_CONFIG
+              value: /workspace/cache/derived_camera_config.json
+
           command:
             - /bin/bash
             - -lc
@@ -88,6 +117,19 @@ spec:
           args:
             - |
               set -euo pipefail
+
+              stage() {
+                echo ""
+                echo "############################################################"
+                echo "# STAGE: $1"
+                echo "############################################################"
+              }
+
+              stage_done() {
+                echo "------------------------------------------------------------"
+                echo "STAGE DONE: $1"
+                echo "------------------------------------------------------------"
+              }
 
               mkdir -p \
                 "${HOME}" \
@@ -98,7 +140,7 @@ spec:
               echo "LeRobot dataset preflight"
               echo "============================================================"
 
-              echo "==> Checking required commands"
+              stage "Checking required commands and Python modules"
 
               command -v python >/dev/null
               command -v lerobot-train >/dev/null
@@ -125,7 +167,9 @@ spec:
               print("Required LeRobot modules are installed")
               PY
 
-              echo "==> Checking mounted base model"
+              stage_done "Required commands and Python modules are present"
+
+              stage "Checking mounted base model"
 
               test -d "${MODEL_DIR}"
               test -f "${MODEL_DIR}/config.json"
@@ -133,7 +177,9 @@ spec:
               echo "Base model: ${MODEL_DIR}"
               du -sh "${MODEL_DIR}"
 
-              echo "==> Checking mounted dataset"
+              stage_done "Base model is mounted and present"
+
+              stage "Checking mounted dataset"
 
               test -d "${DATASET_ROOT}"
               test -f "${DATASET_ROOT}/meta/info.json"
@@ -141,7 +187,9 @@ spec:
               echo "Dataset: ${DATASET_ROOT}"
               du -sh "${DATASET_ROOT}"
 
-              echo "==> Detecting dataset format version"
+              stage_done "Dataset is mounted and present"
+
+              stage "Converting dataset to LeRobot v3.0 (if needed)"
 
               DATASET_VERSION="$(
                 DATASET_ROOT="${DATASET_ROOT}" \
@@ -174,12 +222,11 @@ spec:
               DATASET_VERSION_NORMALIZED="${DATASET_VERSION#v}"
 
               if [[ "${DATASET_VERSION_NORMALIZED}" == 3.0 || "${DATASET_VERSION_NORMALIZED}" == 3.0.* ]]; then
-                echo "Dataset is already compatible with LeRobot v3.0"
+                echo "Dataset is already v3.0 -- no conversion needed"
                 touch "${CONVERSION_MARKER}"
+                stage_done "Dataset already in v3.0 format (no transformation performed)"
               else
-                echo "==> Dataset is not v3.0"
-                echo "Detected version: ${DATASET_VERSION:-unknown}"
-                echo "Attempting conversion to LeRobot Dataset v3.0"
+                echo "Detected version: ${DATASET_VERSION:-unknown} -- converting to v3.0"
 
                 rm -f "${CONVERSION_MARKER}"
 
@@ -189,11 +236,13 @@ spec:
                   --push-to-hub=false
 
                 touch "${CONVERSION_MARKER}"
+                stage_done "Dataset transformed to v3.0"
               fi
 
-              echo "==> Verifying dataset after conversion"
+              stage "Verifying dataset after conversion (version, CAMERA_MAP source keys, action/state features)"
 
               DATASET_ROOT="${DATASET_ROOT}" \
+              CAMERA_MAP="${CAMERA_MAP}" \
               python - <<'PY'
               import json
               import os
@@ -230,29 +279,30 @@ spec:
                       "meta/info.json does not contain a valid 'features' object"
                   )
 
-              required_source_features = {
-                  "observation.images.world_camera",
-                  "observation.images.hand_camera",
-              }
+              camera_map = json.loads(os.environ["CAMERA_MAP"])
 
-              missing = sorted(required_source_features - set(features))
+              missing = sorted(set(camera_map) - set(features))
 
               if missing:
                   raise SystemExit(
-                      "Dataset is missing camera features required by rename_map: "
-                      + ", ".join(missing)
+                      "Dataset is missing camera feature(s) named as CAMERA_MAP "
+                      "source keys: " + ", ".join(missing)
                   )
 
-              target_features = {
-                  "observation.images.base_0_rgb",
-                  "observation.images.left_wrist_0_rgb",
-              }
+              non_video = sorted(
+                  name for name in camera_map if features[name].get("dtype") != "video"
+              )
+              if non_video:
+                  raise SystemExit(
+                      "CAMERA_MAP source key(s) exist in the dataset but are not "
+                      "video features: " + ", ".join(non_video)
+                  )
 
-              collisions = sorted(target_features & set(features))
+              collisions = sorted(set(camera_map.values()) & set(features))
 
               if collisions:
                   raise SystemExit(
-                      "Dataset already contains rename_map target features, "
+                      "Dataset already contains CAMERA_MAP target features, "
                       "which would create ambiguous camera mappings: "
                       + ", ".join(collisions)
                   )
@@ -266,28 +316,133 @@ spec:
                   )
 
               print("Dataset version:", version)
-              print("Required source cameras are present")
+              print("CAMERA_MAP source cameras are present in the dataset")
               print("Action and state features are present")
-              print("Dataset preflight completed successfully")
               PY
 
-              echo "==> Checking for quantile (q01/q99) stats"
+              stage_done "Dataset verified: v3.0, CAMERA_MAP source cameras present, action/state features present"
+
+              stage "Matching RENAME_MAP and POLICY_EMPTY_CAMERAS against the model config"
+
+              # By NAME and by COUNT: read the model's actual VISUAL input
+              # slots from its own downloaded config.json instead of assuming
+              # a fixed set/count. CAMERA_MAP's targets must be a subset of
+              # what the model really has; the number of slots CAMERA_MAP
+              # does not cover becomes --policy.empty_cameras, computed here
+              # rather than hardcoded -- so a future base model with a
+              # different camera count/naming is caught immediately instead
+              # of silently mis-training.
+              MODEL_DIR="${MODEL_DIR}" \
+              CAMERA_MAP="${CAMERA_MAP}" \
+              DATASET_ROOT="${DATASET_ROOT}" \
+              DERIVED_CAMERA_CONFIG="${DERIVED_CAMERA_CONFIG}" \
+              python - <<'PY'
+              import json
+              import os
+              from pathlib import Path
+
+              model_config_path = Path(os.environ["MODEL_DIR"]) / "config.json"
+              with model_config_path.open() as stream:
+                  model_config = json.load(stream)
+
+              input_features = model_config.get("input_features")
+              if not isinstance(input_features, dict) or not input_features:
+                  raise SystemExit(
+                      f"{model_config_path} has no usable 'input_features' object"
+                  )
+
+              # Preserve declaration order: config.json's own ordering is the
+              # model's canonical camera-slot priority (e.g. base view
+              # before wrist views), used below to explain unused slots.
+              required_cameras = [
+                  key
+                  for key, spec in input_features.items()
+                  if isinstance(spec, dict) and spec.get("type") == "VISUAL"
+              ]
+              if not required_cameras:
+                  raise SystemExit(
+                      f"{model_config_path} declares no VISUAL input features -- "
+                      "cannot derive camera requirements for this model"
+                  )
+
+              camera_map = json.loads(os.environ["CAMERA_MAP"])
+
+              invalid_targets = sorted(set(camera_map.values()) - set(required_cameras))
+              if invalid_targets:
+                  raise SystemExit(
+                      "CAMERA_MAP target(s) are not camera inputs this model "
+                      f"actually has ({model_config_path}): " + ", ".join(invalid_targets)
+                      + f"\nModel's real VISUAL inputs: {', '.join(required_cameras)}"
+                  )
+
+              if len(set(camera_map.values())) != len(camera_map.values()):
+                  raise SystemExit(
+                      "CAMERA_MAP maps two different dataset cameras onto the same "
+                      "model input -- each target must be unique"
+                  )
+
+              if len(camera_map) > len(required_cameras):
+                  raise SystemExit(
+                      f"CAMERA_MAP has {len(camera_map)} entries but the model only "
+                      f"has {len(required_cameras)} camera input(s): "
+                      + ", ".join(required_cameras)
+                  )
+
+              empty_cameras = len(required_cameras) - len(camera_map)
+              unused_slots = [c for c in required_cameras if c not in camera_map.values()]
+
+              dataset_root = Path(os.environ["DATASET_ROOT"])
+              with (dataset_root / "meta" / "info.json").open() as stream:
+                  dataset_features = json.load(stream).get("features", {})
+              dataset_cameras = {
+                  name for name, spec in dataset_features.items()
+                  if isinstance(spec, dict) and spec.get("dtype") == "video"
+              }
+              unused_dataset_cameras = sorted(dataset_cameras - set(camera_map))
+              if unused_dataset_cameras:
+                  print(
+                      "NOTE: dataset camera(s) not listed in CAMERA_MAP will be "
+                      "ignored during training: " + ", ".join(unused_dataset_cameras)
+                  )
+
+              print(f"Model requires {len(required_cameras)} camera(s): {', '.join(required_cameras)}")
+              print(f"CAMERA_MAP covers {len(camera_map)}; unused model slot(s) (-> empty_cameras): "
+                    f"{', '.join(unused_slots) or '(none)'}")
+              print(f"RENAME_MAP = {camera_map}")
+              print(f"Derived --policy.empty_cameras={empty_cameras}")
+
+
+
+              derived = {"rename_map": camera_map, "empty_cameras": empty_cameras}
+              out_path = Path(os.environ["DERIVED_CAMERA_CONFIG"])
+              out_path.parent.mkdir(parents=True, exist_ok=True)
+              out_path.write_text(json.dumps(derived))
+              print(f"Wrote {out_path}")
+              PY
+
+              stage_done "RENAME_MAP and POLICY_EMPTY_CAMERAS matched and validated against the model config"
+
+              stage "Computing quantile (q01/q99) statistics"
 
               # IMPORTANT: this must run against the SAME on-cluster dataset
               # copy used for training (DATASET_ROOT, on pvc-datasets) -- a
-              # local run of augment_dataset_quantile_stats on your own
-              # machine has NO effect here, since that's a completely
-              # separate physical copy of the dataset. Idempotent: skips the
-              # (slow) computation if q01/q99 are already present for both
-              # action and observation.state.
+              # local run of compute_quantile_stats.py on your own machine
+              # has NO effect here, since that's a completely separate
+              # physical copy of the dataset. Idempotent: skips computation
+              # if q01/q99 are already present for every feature listed in
+              # QUANTILE_FEATURES.
               HAS_QUANTILES="$(
                 DATASET_ROOT="${DATASET_ROOT}" \
+                QUANTILE_FEATURES="${QUANTILE_FEATURES}" \
                 python - <<'PY'
               import json
               import os
               from pathlib import Path
 
               info_path = Path(os.environ["DATASET_ROOT"]) / "meta" / "stats.json"
+              required = tuple(
+                  f.strip() for f in os.environ["QUANTILE_FEATURES"].split(",") if f.strip()
+              )
 
               if not info_path.exists():
                   print("false")
@@ -296,7 +451,6 @@ spec:
               with info_path.open() as stream:
                   stats = json.load(stream)
 
-              required = ("action", "observation.state")
               ok = all(
                   isinstance(stats.get(feature), dict)
                   and "q01" in stats[feature]
@@ -309,27 +463,44 @@ spec:
 
               if [[ "${HAS_QUANTILES}" == "true" ]]; then
                 echo "q01/q99 stats already present, skipping computation"
+                stage_done "Quantile stats already present (computation skipped)"
               else
-                echo "==> Computing q01/q99 quantile stats (this can take a while)"
-                # Same package version as the conversion script above --
-                # module path matches lerobot 0.6.0's layout (no ".common.").
-                python -m lerobot.datasets.v30.augment_dataset_quantile_stats \
-                  --repo-id="${DATASET_REPO_ID}" \
-                  --root="${DATASET_ROOT}"
+                # Computes stats only for QUANTILE_FEATURES (non-video),
+                # reading directly from the parquet shards -- bypasses
+                # video decoding entirely. This replaces
+                # lerobot.scripts.augment_dataset_quantile_stats, whose
+                # official implementation decodes every video frame and
+                # falls back to fully sequential per-episode processing
+                # whenever video keys are present (no parallelism), which
+                # took ~40h ETA on this dataset's 17629 episodes. Since
+                # this Job's policy.normalization_mapping uses VISUAL:
+                # IDENTITY, video features never need stats in the first
+                # place (see lerobot/processor/normalize_processor.py:
+                # NormalizationMode.IDENTITY short-circuits before any
+                # stats lookup) -- so skipping video here changes nothing
+                # about what training actually uses.
+                echo "Computing q01/q99 for: ${QUANTILE_FEATURES} (reading parquet directly, no video decoding)"
+                python /opt/lerobot-tools/compute_quantile_stats.py \
+                  --root="${DATASET_ROOT}" \
+                  --features="${QUANTILE_FEATURES}"
 
-                echo "==> Verifying quantile stats were actually written"
-                DATASET_ROOT="${DATASET_ROOT}" python - <<'PY'
+                echo "Verifying quantile stats were actually written"
+                DATASET_ROOT="${DATASET_ROOT}" \
+                QUANTILE_FEATURES="${QUANTILE_FEATURES}" \
+                python - <<'PY'
               import json
               import os
               import sys
               from pathlib import Path
 
               info_path = Path(os.environ["DATASET_ROOT"]) / "meta" / "stats.json"
+              required = tuple(
+                  f.strip() for f in os.environ["QUANTILE_FEATURES"].split(",") if f.strip()
+              )
 
               with info_path.open() as stream:
                   stats = json.load(stream)
 
-              required = ("action", "observation.state")
               missing = [
                   feature
                   for feature in required
@@ -341,17 +512,20 @@ spec:
               ]
 
               if missing:
-                  # Known failure mode: augment_dataset_quantile_stats can
-                  # silently no-op on some lerobot versions/datasets --
-                  # https://github.com/huggingface/lerobot/issues/2189
                   sys.exit(
-                      "q01/q99 still missing after running "
-                      "augment_dataset_quantile_stats for: " + ", ".join(missing)
+                      "q01/q99 still missing after running compute_quantile_stats.py "
+                      "for: " + ", ".join(missing)
                   )
 
               print("q01/q99 present for:", ", ".join(required))
               PY
+                stage_done "Quantile stats computed and verified"
               fi
+
+              echo ""
+              echo "============================================================"
+              echo "dataset-preflight completed successfully"
+              echo "============================================================"
 
           volumeMounts:
             # Same mountPath as the download job (/workspace/models) --
@@ -409,14 +583,34 @@ spec:
             - name: MODEL_DIR
               value: /workspace/models/lerobot/pi05_base
 
+            # Human-readable identifier for the base model, matching
+            # download-job.yaml's MODEL_REPO_ID -- recorded in the
+            # fine-tuned model's metadata file, and used to mirror the
+            # base model's path under pvc-finetuned-models (see
+            # BASE_MODELS_ROOT/MODEL_DIR below).
+            - name: MODEL_REPO_ID
+              value: lerobot/pi05_base
+
+            # Mount path of the base-models PVC (must match this
+            # container's volumeMounts below). MODEL_DIR's path relative
+            # to this root ("lerobot/pi05_base") is mirrored under
+            # pvc-finetuned-models so the fine-tuned output lives at the
+            # same relative location as the base model it came from.
+            - name: BASE_MODELS_ROOT
+              value: /workspace/models
+
+            # Root of the finetuned-models PVC (mounted below). The
+            # actual per-run output directory is computed in-script as
+            # "${FINETUNED_MODELS_ROOT}/<model's relative path>/<run
+            # timestamp>", not hardcoded here.
+            - name: FINETUNED_MODELS_ROOT
+              value: /workspace/output
+
             - name: DATASET_REPO_ID
               value: nvidia/PhysicalAI-Robotics-Manipulation-SingleArm
 
             - name: DATASET_ROOT
               value: /workspace/data/nvidia/PhysicalAI-Robotics-Manipulation-SingleArm/panda-stack-platforms
-
-            - name: OUTPUT_ROOT
-              value: /workspace/output/pi05-panda-stack-platforms
 
             - name: JOB_NAME
               value: pi05-panda-stack-platforms
@@ -424,16 +618,19 @@ spec:
             - name: TRAINING_STEPS
               value: "20000"
 
-            # Conservative starting value for one NVIDIA L40S.
+            # Fixed value. lerobot/pi05_libero_base's own model card example
+            # uses batch_size=4 for single-run fine-tuning of this same
+            # policy family; adjust if you outgrow this GPU's memory.
             - name: BATCH_SIZE
-              value: "1"
+              value: "4"
 
             - name: NUM_WORKERS
               value: "4"
 
-            - name: RENAME_MAP
-              value: >-
-                {"observation.images.world_camera":"observation.images.base_0_rgb","observation.images.hand_camera":"observation.images.left_wrist_0_rgb"}
+            # Written by dataset-preflight (validated against this exact
+            # model's config.json): {"rename_map": {...}, "empty_cameras": N}.
+            - name: DERIVED_CAMERA_CONFIG
+              value: /workspace/cache/derived_camera_config.json
 
             - name: NORMALIZATION_MAPPING
               value: >-
@@ -454,6 +651,38 @@ spec:
             - |
               set -euo pipefail
 
+              stage() {
+                echo ""
+                echo "############################################################"
+                echo "# STAGE: $1"
+                echo "############################################################"
+              }
+
+              stage_done() {
+                echo "------------------------------------------------------------"
+                echo "STAGE DONE: $1"
+                echo "------------------------------------------------------------"
+              }
+
+              # Mirror the base model's own path structure under
+              # pvc-finetuned-models: MODEL_DIR="/workspace/models/lerobot/pi05_base"
+              # with BASE_MODELS_ROOT="/workspace/models" gives
+              # MODEL_RELATIVE_PATH="lerobot/pi05_base", so the fine-tuned
+              # output root becomes "/workspace/output/lerobot/pi05_base"
+              # -- same relative location, different (finetuned-models)
+              # storage. Not hardcoded, so changing MODEL_DIR/MODEL_REPO_ID
+              # automatically changes where output lands too.
+              case "${MODEL_DIR}" in
+                "${BASE_MODELS_ROOT}"/*)
+                  MODEL_RELATIVE_PATH="${MODEL_DIR#"${BASE_MODELS_ROOT}"/}"
+                  ;;
+                *)
+                  echo "MODEL_DIR (${MODEL_DIR}) is not under BASE_MODELS_ROOT (${BASE_MODELS_ROOT})" >&2
+                  exit 1
+                  ;;
+              esac
+              OUTPUT_ROOT="${FINETUNED_MODELS_ROOT}/${MODEL_RELATIVE_PATH}"
+
               RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
               RUN_NAME="${JOB_NAME}-${RUN_ID}"
               RUN_OUTPUT_DIR="${OUTPUT_ROOT}/${RUN_ID}"
@@ -471,19 +700,51 @@ spec:
                 "${HF_LEROBOT_HOME}" \
                 "${OUTPUT_ROOT}"
 
+              echo "Fine-tuned model will be written to: ${RUN_OUTPUT_DIR}"
+
               echo "============================================================"
               echo "LeRobot π0.5 fine-tuning"
               echo "============================================================"
               echo "Run name: ${RUN_NAME}"
               echo "Output:   ${RUN_OUTPUT_DIR}"
 
-              echo "==> Final model and dataset checks"
+              stage "Final model and dataset checks"
 
               test -f "${MODEL_DIR}/config.json"
               test -f "${DATASET_ROOT}/meta/info.json"
               test -f "${DATASET_ROOT}/.converted-v30"
+              test -f "${DERIVED_CAMERA_CONFIG}"
 
-              echo "==> Checking available disk space"
+              stage_done "Model and dataset files are present"
+
+              stage "Loading RENAME_MAP and POLICY_EMPTY_CAMERAS derived by dataset-preflight"
+
+              # Written by dataset-preflight's model-config-driven derivation
+              # (see training-job.yaml's initContainers) -- not hardcoded here,
+              # so a different base model/dataset combination is reflected
+              # automatically instead of silently using stale values.
+              RENAME_MAP="$(
+                DERIVED_CAMERA_CONFIG="${DERIVED_CAMERA_CONFIG}" \
+                python -c '
+              import json, os
+              with open(os.environ["DERIVED_CAMERA_CONFIG"]) as f:
+                  print(json.dumps(json.load(f)["rename_map"]))
+              '
+              )"
+              POLICY_EMPTY_CAMERAS="$(
+                DERIVED_CAMERA_CONFIG="${DERIVED_CAMERA_CONFIG}" \
+                python -c '
+              import json, os
+              with open(os.environ["DERIVED_CAMERA_CONFIG"]) as f:
+                  print(json.load(f)["empty_cameras"])
+              '
+              )"
+              echo "RENAME_MAP:           ${RENAME_MAP}"
+              echo "POLICY_EMPTY_CAMERAS: ${POLICY_EMPTY_CAMERAS}"
+
+              stage_done "RENAME_MAP and POLICY_EMPTY_CAMERAS loaded"
+
+              stage "Checking available disk space"
 
               # RUN_OUTPUT_DIR doesn't exist yet at this point (see note
               # above), so check space on its parent instead.
@@ -491,7 +752,9 @@ spec:
                 "${DATASET_ROOT}" \
                 "${OUTPUT_ROOT}"
 
-              echo "==> Checking LeRobot CLI options"
+              stage_done "Disk space checked"
+
+              stage "Checking LeRobot CLI options"
 
               TRAIN_HELP="$(lerobot-train --help 2>&1)"
 
@@ -515,7 +778,9 @@ spec:
 
               echo "Required lerobot-train options are available"
 
-              echo "==> Verifying CUDA and GPU"
+              stage_done "LeRobot CLI options verified"
+
+              stage "Verifying CUDA and GPU"
 
               python - <<'PY'
               import importlib.metadata
@@ -548,39 +813,128 @@ spec:
                   )
               PY
 
-              echo "==> Training configuration"
+              stage_done "CUDA and GPU verified"
+
+              stage "Training configuration summary"
               echo "Model:                ${MODEL_DIR}"
               echo "Dataset:              ${DATASET_ROOT}"
               echo "Steps:                ${TRAINING_STEPS}"
               echo "Batch size:           ${BATCH_SIZE}"
               echo "Workers:              ${NUM_WORKERS}"
-              echo "Empty cameras:        1"
+              echo "RENAME_MAP:           ${RENAME_MAP}"
+              echo "Empty cameras:        ${POLICY_EMPTY_CAMERAS}"
               echo "Normalization:        ${NORMALIZATION_MAPPING}"
               echo "Freeze vision encoder: true"
               echo "Train expert only:     true"
               echo "Compile model:         true"
+              stage_done "Configuration summary printed"
 
-              echo "==> Starting fine-tuning"
+              stage "Starting fine-tuning"
 
-              exec lerobot-train \
-                --dataset.repo_id="${DATASET_REPO_ID}" \
-                --dataset.root="${DATASET_ROOT}" \
-                --policy.path="${MODEL_DIR}" \
-                --policy.device=cuda \
-                --policy.empty_cameras=1 \
-                --policy.compile_model=true \
-                --policy.freeze_vision_encoder=true \
-                --policy.train_expert_only=true \
-                --policy.normalization_mapping="${NORMALIZATION_MAPPING}" \
-                --rename_map="${RENAME_MAP}" \
-                --output_dir="${RUN_OUTPUT_DIR}" \
-                --job_name="${RUN_NAME}" \
-                --steps="${TRAINING_STEPS}" \
-                --batch_size="${BATCH_SIZE}" \
-                --num_workers="${NUM_WORKERS}" \
-                --save_checkpoint_to_hub=false \
-                --policy.push_to_hub=false \
+              # Built as an array (not a single string) so the arguments
+              # used here and the ones logged into the metadata file below
+              # are guaranteed to be the exact same list, not a
+              # hand-reconstructed guess.
+              TRAIN_ARGS=(
+                --dataset.repo_id="${DATASET_REPO_ID}"
+                --dataset.root="${DATASET_ROOT}"
+                --policy.path="${MODEL_DIR}"
+                --policy.device=cuda
+                --policy.empty_cameras="${POLICY_EMPTY_CAMERAS}"
+                --policy.compile_model=true
+                --policy.freeze_vision_encoder=true
+                --policy.train_expert_only=true
+                --policy.normalization_mapping="${NORMALIZATION_MAPPING}"
+                --rename_map="${RENAME_MAP}"
+                --output_dir="${RUN_OUTPUT_DIR}"
+                --job_name="${RUN_NAME}"
+                --steps="${TRAINING_STEPS}"
+                --batch_size="${BATCH_SIZE}"
+                --num_workers="${NUM_WORKERS}"
+                --save_checkpoint_to_hub=false
+                --policy.push_to_hub=false
                 --wandb.enable=false
+              )
+
+              # Deliberately NOT "exec" here: this container needs to run
+              # again after lerobot-train exits, to write the fine-tuned
+              # model's metadata file. The "if ...; then/else" form (rather
+              # than checking $? afterward) is required under
+              # "set -euo pipefail" -- a failing command directly in an
+              # if-condition does not trigger -e, whereas checking $? on a
+              # separate line after the command would have already exited
+              # the script on failure before that line ever ran.
+              if lerobot-train "${TRAIN_ARGS[@]}"; then
+                echo "lerobot-train completed successfully"
+              else
+                TRAIN_EXIT_CODE=$?
+                echo "lerobot-train failed with exit code ${TRAIN_EXIT_CODE}" >&2
+                exit "${TRAIN_EXIT_CODE}"
+              fi
+
+              stage_done "Fine-tuning completed"
+
+              stage "Writing fine-tuned model metadata"
+
+              # RUN_OUTPUT_DIR now exists (lerobot-train created it) and
+              # holds the checkpoint(s); the metadata file is written
+              # alongside them on pvc-finetuned-models, in the same
+              # dated run folder.
+              DATASET_ROOT="${DATASET_ROOT}" \
+              MODEL_REPO_ID="${MODEL_REPO_ID}" \
+              MODEL_DIR="${MODEL_DIR}" \
+              DATASET_REPO_ID="${DATASET_REPO_ID}" \
+              RUN_ID="${RUN_ID}" \
+              RUN_OUTPUT_DIR="${RUN_OUTPUT_DIR}" \
+              RENAME_MAP="${RENAME_MAP}" \
+              POLICY_EMPTY_CAMERAS="${POLICY_EMPTY_CAMERAS}" \
+              TRAIN_COMMAND="lerobot-train ${TRAIN_ARGS[*]}" \
+              python - <<'PY'
+              import json
+              import os
+              from datetime import datetime, timezone
+              from pathlib import Path
+
+              dataset_root = Path(os.environ["DATASET_ROOT"])
+              with (dataset_root / "meta" / "info.json").open() as stream:
+                  dataset_info = json.load(stream)
+
+              dataset_format = str(
+                  dataset_info.get("codebase_version")
+                  or dataset_info.get("version")
+                  or dataset_info.get("dataset_version")
+                  or "unknown"
+              )
+
+              metadata = {
+                  "run_id": os.environ["RUN_ID"],
+                  "finetuned_at_utc": datetime.now(timezone.utc).isoformat(),
+                  "base_model": {
+                      "repo_id": os.environ["MODEL_REPO_ID"],
+                      "path": os.environ["MODEL_DIR"],
+                  },
+                  "dataset": {
+                      "repo_id": os.environ["DATASET_REPO_ID"],
+                      "root": os.environ["DATASET_ROOT"],
+                      "format_version": dataset_format,
+                  },
+                  "rename_map": json.loads(os.environ["RENAME_MAP"]),
+                  "policy_empty_cameras": int(os.environ["POLICY_EMPTY_CAMERAS"]),
+                  "train_command": os.environ["TRAIN_COMMAND"],
+              }
+
+              out_path = Path(os.environ["RUN_OUTPUT_DIR"]) / "finetune_metadata.json"
+              out_path.write_text(json.dumps(metadata, indent=2))
+              print(f"Wrote {out_path}")
+              print(json.dumps(metadata, indent=2))
+              PY
+
+              stage_done "Metadata written to ${RUN_OUTPUT_DIR}/finetune_metadata.json"
+
+              echo ""
+              echo "============================================================"
+              echo "Fine-tuned model available at: ${RUN_OUTPUT_DIR}"
+              echo "============================================================"
 
           volumeMounts:
             # IMPORTANT: mounted at the SAME path the download job used

@@ -91,8 +91,20 @@ CUDA_TOOLKIT_VERSION=...
 PYTORCH_CUDA_BRANCH=...
 TORCH_VERSION=...
 TORCHVISION_VERSION=...
+TORCHCODEC_VERSION=...
+NVIDIA_NPP_PACKAGE=...
+NVIDIA_NPP_VERSION=...
 LEROBOT_VERSION=...
 ```
+
+`TORCHCODEC_VERSION` is picked so that its wheel's own declared `torch`
+requirement is satisfied by the exact resolved `TORCH_VERSION` (TorchCodec's
+compatibility window is narrow — e.g. TorchCodec 0.11 requires `torch==2.11`
+exactly), and `NVIDIA_NPP_PACKAGE`/`NVIDIA_NPP_VERSION` are the latest
+published NVIDIA NPP wheel for the CUDA major version actually selected
+(`nvidia-npp-cu12`, `nvidia-npp-cu13`, ...). TorchCodec's CUDA wheel needs
+NPP's `libnppicc` at runtime; it is not bundled by the torch/torchcodec
+wheels themselves.
 
 Review the manifest before building:
 
@@ -111,6 +123,8 @@ printf 'Python: %s\n' "$PYTHON_VERSION"
 printf 'CUDA branch: %s\n' "$PYTORCH_CUDA_BRANCH"
 printf 'PyTorch: %s\n' "$TORCH_VERSION"
 printf 'TorchVision: %s\n' "$TORCHVISION_VERSION"
+printf 'TorchCodec: %s\n' "$TORCHCODEC_VERSION"
+printf 'NVIDIA NPP: %s==%s\n' "$NVIDIA_NPP_PACKAGE" "$NVIDIA_NPP_VERSION"
 printf 'LeRobot: %s\n' "$LEROBOT_VERSION"
 ```
 
@@ -128,6 +142,9 @@ podman build \
   --build-arg PYTORCH_INDEX_URL="$PYTORCH_INDEX_URL" \
   --build-arg TORCH_VERSION="$TORCH_VERSION" \
   --build-arg TORCHVISION_VERSION="$TORCHVISION_VERSION" \
+  --build-arg TORCHCODEC_VERSION="$TORCHCODEC_VERSION" \
+  --build-arg NVIDIA_NPP_PACKAGE="$NVIDIA_NPP_PACKAGE" \
+  --build-arg NVIDIA_NPP_VERSION="$NVIDIA_NPP_VERSION" \
   --build-arg LEROBOT_VERSION="$LEROBOT_VERSION" \
   --build-arg TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
   --build-arg GPU_COMPUTE_CAPABILITY="$GPU_COMPUTE_CAPABILITY" \
@@ -217,6 +234,15 @@ project directory containing the `Containerfile`.
 
 ## Notes
 
+- FFmpeg is not installed from a package repository; it is compiled from
+  source as shared libraries in a dedicated builder stage (`ffmpeg-builder`)
+  against the same UBI 9 base as the final image, then copied into
+  `/opt/ffmpeg` in the runtime stage. This is the "system FFmpeg" TorchCodec
+  loads at runtime — there is no venv/conda FFmpeg involved anywhere.
+- If your resolved `PYTORCH_CUDA_BRANCH` is on CUDA 13.x and no
+  `nvidia-npp-cu13` wheel has been published to PyPI yet, the resolver will
+  fail loudly asking you to pin `--cuda-max` to a 12.x-compatible value
+  instead of silently installing a mismatched NPP package.
 - `versions.env` is generated output and should contain exact selected versions.
 - The resolver may query external package sources when determining compatibility.
 - The container image is designed for GPU workloads, but the NVIDIA driver must remain
