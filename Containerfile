@@ -304,13 +304,13 @@ RUN set -eux; \
     /opt/ffmpeg/bin/ffmpeg -version; \
     ldconfig -p | grep -E 'libav(codec|format|util)|libsw(scale|resample)'
 
+# REMOVED ARGUMENT "CUDA_VISIBLE_DEVICES=0" TO ALLOW THIS IMAGE WORK WITH ANY NUMBER OF GPUS
 ENV PATH=/opt/ffmpeg/bin:${PATH} \
     LD_LIBRARY_PATH=/opt/ffmpeg/lib64:${LD_LIBRARY_PATH} \
     PKG_CONFIG_PATH=/opt/ffmpeg/lib64/pkgconfig \
     TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     MUJOCO_GL=egl \
     PYOPENGL_PLATFORM=egl \
-    CUDA_VISIBLE_DEVICES=0 \
     DEVICE=cuda \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \

@@ -44,3 +44,4 @@ yarn-debug.log*
 
 .secrets
 k8s/new.yaml
+finetuned/

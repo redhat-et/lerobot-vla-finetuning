@@ -27,9 +27,19 @@ spec:
 
       # These PVCs use zonal EBS storage. This must match the zone in which
       # the download Job initially provisioned and mounted them.
+      #
+      # gpu-pool-size=xlarge is this cluster's only currently-scaled GPU
+      # pool (checked via `oc get machinesets -n openshift-machine-api`):
+      # 3 nodes total, each with 4x NVIDIA L40S (46GB). Pinning to it
+      # explicitly (rather than relying on nvidia.com/gpu.present alone)
+      # protects against a future gpu-pool/gpu-pool-large pool -- currently
+      # scaled to 0 -- being scaled up with a different GPU count per node,
+      # which could otherwise silently change how many GPUs this Job's
+      # fixed "nvidia.com/gpu" resource request lands on.
       nodeSelector:
         topology.kubernetes.io/zone: us-east-1b
         nvidia.com/gpu.present: "true"
+        gpu-pool-size: xlarge
 
       imagePullSecrets:
         - name: quay-pull-secret
@@ -411,6 +421,21 @@ spec:
               print(f"RENAME_MAP = {camera_map}")
               print(f"Derived --policy.empty_cameras={empty_cameras}")
 
+              # The pretrained checkpoint's action/state projection layers
+              # (e.g. action_in_proj) are fixed-size weight matrices sized
+              # for the model's max_action_dim/max_state_dim (32 for
+              # pi0/pi05_base). Smaller dataset dims are zero-padded at
+              # runtime and work fine; LARGER ones do not fit those
+              # weights at all and fail to load with a shape-mismatch
+              # error -- a real, confirmed failure mode, see
+              # https://github.com/huggingface/lerobot/issues/2963
+              # ("size mismatch for model.action_in_proj.weight"). Catch
+              # this here, before spending GPU time, instead of at
+              # lerobot-train's checkpoint-loading step.
+              dim_checks = (
+                  ("action", "max_action_dim"),
+                  ("observation.state", "max_state_dim"),
+              )
 
 
               derived = {"rename_map": camera_map, "empty_cameras": empty_cameras}
@@ -627,6 +652,18 @@ spec:
             - name: NUM_WORKERS
               value: "4"
 
+            # Kubernetes Downward API: automatically reflects THIS
+            # container's own resources.limits.nvidia.com/gpu, whatever it
+            # is set to above -- not a second hardcoded copy of "4" that
+            # could silently drift out of sync if that value ever changes.
+            # Used purely as a sanity cross-check against the GPU count
+            # PyTorch actually reports at runtime (see "Verifying CUDA and
+            # GPU" stage below); they should always agree under normal
+            # Kubernetes GPU scheduling, so a mismatch is a genuine signal
+            # something is wrong, not routine variation.
+            - name: EXPECTED_GPU_COUNT
+              value: "4"
+
             # Written by dataset-preflight (validated against this exact
             # model's config.json): {"rename_map": {...}, "empty_cameras": N}.
             - name: DERIVED_CAMERA_CONFIG
@@ -800,26 +837,46 @@ spec:
               if torch.cuda.device_count() < 1:
                   raise SystemExit("No NVIDIA GPU is visible to PyTorch")
 
-              name = torch.cuda.get_device_name(0)
-              capability = torch.cuda.get_device_capability(0)
+              # Check every visible GPU, not just device 0 -- with multiple
+              # GPUs requested, a mixed/heterogeneous node could otherwise
+              # slip an unsupported card past this check.
+              for device_index in range(torch.cuda.device_count()):
+                  name = torch.cuda.get_device_name(device_index)
+                  capability = torch.cuda.get_device_capability(device_index)
+                  print(f"GPU {device_index}: {name}, compute capability {capability}")
 
-              print("GPU:", name)
-              print("Compute capability:", capability)
-
-              if capability < (8, 0):
-                  raise SystemExit(
-                      f"GPU compute capability {capability} is not supported "
-                      "by this training configuration"
-                  )
+                  if capability < (8, 0):
+                      raise SystemExit(
+                          f"GPU {device_index} ({name}) has compute capability "
+                          f"{capability}, which is not supported by this "
+                          "training configuration"
+                      )
               PY
 
-              stage_done "CUDA and GPU verified"
+              # Read back separately (rather than parsing the diagnostic
+              # output above) so this stays a single, unambiguous value.
+              GPU_COUNT="$(python -c 'import torch; print(torch.cuda.device_count())')"
+              echo "Detected GPU_COUNT=${GPU_COUNT}"
+              echo "Kubernetes granted (resources.limits.nvidia.com/gpu): EXPECTED_GPU_COUNT=${EXPECTED_GPU_COUNT}"
+
+              if [[ "${GPU_COUNT}" != "${EXPECTED_GPU_COUNT}" ]]; then
+                echo "GPU count mismatch: PyTorch sees ${GPU_COUNT} GPU(s), but this" >&2
+                echo "Pod was granted ${EXPECTED_GPU_COUNT} via resources.limits.nvidia.com/gpu." >&2
+                echo "This should not happen under normal Kubernetes GPU scheduling --" >&2
+                echo "stopping rather than launching distributed training with an" >&2
+                echo "unexpected device count." >&2
+                exit 1
+              fi
+
+              stage_done "CUDA and GPU verified (${GPU_COUNT} GPU(s) visible)"
 
               stage "Training configuration summary"
               echo "Model:                ${MODEL_DIR}"
               echo "Dataset:              ${DATASET_ROOT}"
               echo "Steps:                ${TRAINING_STEPS}"
-              echo "Batch size:           ${BATCH_SIZE}"
+              echo "Batch size (per GPU): ${BATCH_SIZE}"
+              echo "GPUs:                 ${GPU_COUNT}"
+              echo "Effective batch size: $(( BATCH_SIZE * GPU_COUNT ))"
               echo "Workers:              ${NUM_WORKERS}"
               echo "RENAME_MAP:           ${RENAME_MAP}"
               echo "Empty cameras:        ${POLICY_EMPTY_CAMERAS}"
@@ -859,19 +916,75 @@ spec:
               )
 
               # Deliberately NOT "exec" here: this container needs to run
-              # again after lerobot-train exits, to write the fine-tuned
-              # model's metadata file. The "if ...; then/else" form (rather
-              # than checking $? afterward) is required under
-              # "set -euo pipefail" -- a failing command directly in an
-              # if-condition does not trigger -e, whereas checking $? on a
-              # separate line after the command would have already exited
-              # the script on failure before that line ever ran.
-              if lerobot-train "${TRAIN_ARGS[@]}"; then
-                echo "lerobot-train completed successfully"
+              # again after training exits, to write the fine-tuned model's
+              # metadata file. The "if ...; then/else" form (rather than
+              # checking $? afterward) is required under "set -euo
+              # pipefail" -- a failing command directly in an if-condition
+              # does not trigger -e, whereas checking $? on a separate line
+              # after the command would have already exited the script on
+              # failure before that line ever ran.
+              #
+              # Branches on GPU_COUNT (captured earlier from
+              # torch.cuda.device_count()) rather than always going through
+              # accelerate: LeRobot's own nightly CI
+              # (tests/training/test_multi_gpu.py) explicitly skips all
+              # multi-GPU/accelerate tests when fewer than 2 GPUs are
+              # available -- "accelerate launch" with num_processes=1 is
+              # never exercised upstream, so this avoids relying on
+              # untested behavior for the single-GPU case.
+              if (( GPU_COUNT >= 2 )); then
+                echo "GPU_COUNT=${GPU_COUNT} -- launching distributed via accelerate"
+
+                python -c "import accelerate; print('accelerate', accelerate.__version__)"
+
+                # Mirrors _write_multi_gpu_config() in LeRobot's own
+                # tests/training/test_multi_gpu.py field-for-field (the
+                # exact config their nightly CI validates against), rather
+                # than relying on accelerate's undocumented-for-lerobot
+                # auto-detect path. Regenerated each run (num_processes
+                # depends on GPU_COUNT), written to a scratch location, not
+                # the dataset/model PVCs.
+                ACCELERATE_CONFIG="/tmp/accelerate_config.yaml"
+                cat > "${ACCELERATE_CONFIG}" <<EOF
+              compute_environment: LOCAL_MACHINE
+              distributed_type: MULTI_GPU
+              mixed_precision: 'no'
+              num_processes: ${GPU_COUNT}
+              use_cpu: false
+              gpu_ids: all
+              downcast_bf16: 'no'
+              machine_rank: 0
+              main_training_function: main
+              num_machines: 1
+              rdzv_backend: static
+              same_network: true
+              EOF
+
+                LEROBOT_TRAIN_BIN="$(command -v lerobot-train)"
+                TRAIN_COMMAND="accelerate launch --config_file ${ACCELERATE_CONFIG} ${LEROBOT_TRAIN_BIN} ${TRAIN_ARGS[*]}"
+
+                if accelerate launch \
+                    --config_file "${ACCELERATE_CONFIG}" \
+                    "${LEROBOT_TRAIN_BIN}" \
+                    "${TRAIN_ARGS[@]}"
+                then
+                  echo "accelerate launch (${GPU_COUNT} GPUs) completed successfully"
+                else
+                  TRAIN_EXIT_CODE=$?
+                  echo "accelerate launch failed with exit code ${TRAIN_EXIT_CODE}" >&2
+                  exit "${TRAIN_EXIT_CODE}"
+                fi
               else
-                TRAIN_EXIT_CODE=$?
-                echo "lerobot-train failed with exit code ${TRAIN_EXIT_CODE}" >&2
-                exit "${TRAIN_EXIT_CODE}"
+                echo "GPU_COUNT=${GPU_COUNT} -- launching lerobot-train directly (no accelerate)"
+                TRAIN_COMMAND="lerobot-train ${TRAIN_ARGS[*]}"
+
+                if lerobot-train "${TRAIN_ARGS[@]}"; then
+                  echo "lerobot-train completed successfully"
+                else
+                  TRAIN_EXIT_CODE=$?
+                  echo "lerobot-train failed with exit code ${TRAIN_EXIT_CODE}" >&2
+                  exit "${TRAIN_EXIT_CODE}"
+                fi
               fi
 
               stage_done "Fine-tuning completed"
@@ -890,7 +1003,9 @@ spec:
               RUN_OUTPUT_DIR="${RUN_OUTPUT_DIR}" \
               RENAME_MAP="${RENAME_MAP}" \
               POLICY_EMPTY_CAMERAS="${POLICY_EMPTY_CAMERAS}" \
-              TRAIN_COMMAND="lerobot-train ${TRAIN_ARGS[*]}" \
+              GPU_COUNT="${GPU_COUNT}" \
+              BATCH_SIZE="${BATCH_SIZE}" \
+              TRAIN_COMMAND="${TRAIN_COMMAND}" \
               python - <<'PY'
               import json
               import os
@@ -922,6 +1037,8 @@ spec:
                   },
                   "rename_map": json.loads(os.environ["RENAME_MAP"]),
                   "policy_empty_cameras": int(os.environ["POLICY_EMPTY_CAMERAS"]),
+                  "gpu_count": int(os.environ["GPU_COUNT"]),
+                  "batch_size_per_gpu": int(os.environ["BATCH_SIZE"]),
                   "train_command": os.environ["TRAIN_COMMAND"],
               }
 
@@ -960,15 +1077,34 @@ spec:
             - name: training-cache
               mountPath: /workspace/cache
 
+            - name: dshm
+              mountPath: /dev/shm
+
+          # Kubernetes still requires a fixed GPU count declared here for
+          # the scheduler up front -- there's no "however many the node
+          # has" resource request. That's the one unavoidable manual
+          # value. Everything about HOW TRAINING USES those GPUs is no
+          # longer decided here, though: the trainer script below always
+          # launches via `accelerate launch --multi_gpu` WITHOUT
+          # `--num_processes`, and accelerate itself auto-detects the
+          # actual GPU count at launch time (torch.cuda.device_count()
+          # under the hood) and uses all of them -- confirmed working
+          # identically for both single- and multi-GPU cases in HF's own
+          # docs, no branching needed on our side.
+          #
+          # Currently confirmed via `oc get machinesets`: the only live
+          # GPU pool in this cluster is gpu-pool-size=xlarge (4x NVIDIA
+          # L40S per node, see nodeSelector above) -- so values above 4
+          # will never schedule right now.
           resources:
             requests:
-              cpu: "8"
-              memory: 48Gi
-              nvidia.com/gpu: "1"
+              cpu: "32"
+              memory: 192Gi
+              nvidia.com/gpu: "4"
             limits:
-              cpu: "16"
-              memory: 96Gi
-              nvidia.com/gpu: "1"
+              cpu: "64"
+              memory: 384Gi
+              nvidia.com/gpu: "4"
 
           securityContext:
             allowPrivilegeEscalation: false
@@ -993,3 +1129,15 @@ spec:
         - name: training-cache
           emptyDir:
             sizeLimit: 50Gi
+
+        # Default container /dev/shm is ~64Mi, far too small for
+        # PyTorch DataLoader workers (num_workers>0) passing image
+        # batches between worker and main processes via shared
+        # memory -- this caused "unable to allocate shared memory(shm)"
+        # RuntimeErrors once real batches started flowing. medium:
+        # Memory makes this a tmpfs (real RAM, counted against the
+        # trainer container's memory limit below).
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi

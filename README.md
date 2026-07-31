@@ -53,7 +53,7 @@ Log in to the cluster and inspect the GPU pool, model, memory, driver, maximum C
 version, and compute capability:
 
 ```bash
-oc get nodes -l nvidia.com/gpu.present=true -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.gpu-pool-size}{"\t"}{.metadata.labels.nvidia\.com/gpu\.product}{"\t"}{.metadata.labels.nvidia\.com/gpu\.memory}{"\t"}{.metadata.labels.nvidia\.com/gpu\.count}{"\t"}{.metadata.labels.nvidia\.com/cuda\.driver-version\.full}{"\t"}{.metadata.labels.nvidia\.com/cuda\.runtime-version\.full}{"\t"}{.metadata.labels.nvidia\.com/gpu\.compute\.major}{"\t"}{.metadata.labels.nvidia\.com/gpu\.compute\.minor}{"\n"}{end}' | awk -F'\t' 'BEGIN{print "NODE\tPOOL\tMODEL\tVRAM_PER_GPU_MB\tCOUNT\tTOTAL_VRAM_GB\tDRIVER\tCUDA_MAX\tCOMPUTE_CAP"} {printf "%s\t%s\t%s\t%s\t%s\t%.0f\t%s\t%s\t%s.%s\n", $1,$2,$3,$4,$5,($4*$5)/1024,$6,$7,$8,$9}'
+oc get nodes -l nvidia.com/gpu.present=true -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.gpu-pool-size}{"\t"}{.metadata.labels.nvidia\.com/gpu\.product}{"\t"}{.metadata.labels.nvidia\.com/gpu\.memory}{"\t"}{.metadata.labels.nvidia\.com/gpu\.count}{"\t"}{.metadata.labels.nvidia\.com/cuda\.driver-version\.full}{"\t"}{.metadata.labels.nvidia\.com/cuda\.runtime-version\.full}{"\t"}{.metadata.labels.nvidia\.com/gpu\.compute\.major}{"\t"}{.metadata.labels.nvidia\.com/gpu\.compute\.minor}{"\n"}{end}' | awk -F'\t' 'BEGIN{print "NODE\t\t\t\tPOOL\tMODEL\t\tVRAM COUNT TOTAL_VRAM_GB DRIVER      CUDA_MAX COMPUTE_CAP"} {printf "%s\t%s\t%s\t%s\t%s\t%.0f\t%s\t%s\t%s.%s\n", $1,$2,$3,$4,$5,($4*$5)/1024,$6,$7,$8,$9}'
 ```
 
 Example values used below:
@@ -214,19 +214,35 @@ oc apply --dry-run=server -f ./k8s/download-job.yaml
 ## 9. Create PVC
 ```bash
 oc apply -f ./k8s/storage-pvcs.yaml      # creating
-oc get pvc                               # checking
 ```
 
 ## 10. Run download job
 ```bash
 oc apply -f ./k8s/download-job.yaml      # creating 
-oc get jobs                              # checking
 ```
 
 ## 11. Run fine-tuning job
 ```bash
 oc apply -f ./k8s/training-job.yaml      # creating 
-oc get jobs                              # checking
+```
+
+## 12. Access to fine-tuned checkpoints
+```bash
+oc apply -f ./k8s/pvc-access.yaml      # creating 
+oc wait --for=condition=Ready pod/pvc-access --timeout=60s
+```
+## 13. Copy fine-tuned checkpoint to local machine
+```bash
+chmod +x ./k8s/pvc-download.sh   
+./k8s/pvc-download.sh /mnt/models/lerobot/pi05_base/<checkpoint_folder> ./finetuned/pi05_base_<checkpoint_folder>
+```
+Example: 
+chmod +x ./k8s/pvc-download.sh
+./k8s/pvc-download.sh /mnt/models/lerobot/pi05_base/20260731T130734Z ./finetuned/pi05_base_20260731T130734Z
+
+#  Delete the temporary helper pod
+```bash
+./k8s/pvc-download.sh --cleanup
 ```
 
 The final dot is the Podman build context. In the current setup it can be the local
