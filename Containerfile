@@ -4,12 +4,34 @@
 # - UBI 9 / Python 3.12 runtime
 # - PyTorch CUDA 12.8
 # - TorchCodec CUDA wheel
-# - FFmpeg 7.1.1 built as shared libraries in a UBI 9 builder stage
+# - FFmpeg 7.1.1 built as shared libraries in a UBI 9 builder stage, with
+#   libdav1d (AV1) and libvpx (VP9) decode support -- FFmpeg's own
+#   built-in/native AV1 decoder is listed by `ffmpeg -decoders` but does
+#   NOT actually decode all real-world AV1 content (confirmed failure:
+#   "Could not push packet to decoder: Function not implemented" on
+#   lerobot/libero, which is AV1-encoded, while nvidia's H264-encoded
+#   dataset worked fine with the native decoder). dav1d is the de facto
+#   standard AV1 decoder (used by browsers, VLC, etc.) and does not have
+#   this gap. libaom (AV1 encoder) is used ONLY in the builder stage to
+#   synthesize AV1/VP9 test fixtures for the runtime decode smoke test
+#   below. If it was available at build time, FFmpeg links against it
+#   (--enable-libaom) and its runtime .so is REQUIRED in the final image
+#   too -- there is no such thing as an "optional" enabled codec library
+#   at the shared-library level; ffmpeg fails to load AT ALL (not just
+#   AV1 encoding) without it. libdav1d/libvpx/libaom availability is
+#   detected at build time (this UBI9 CodeReady Builder mirror does not
+#   always carry the same package set as a full RHEL subscription); only
+#   libdav1d is a hard requirement (it's the confirmed decode fix),
+#   libvpx/libaom degrade gracefully to "feature not built" if missing
+#   -- but whichever ARE built in must have their runtime package
+#   installed below, unconditionally, no exceptions.
 # - /opt/lerobot-tools/compute_quantile_stats.py: fast q01/q99 dataset
 #   stats for non-video features, bypassing video decoding (see the
 #   script's own docstring for why this exists)
 #
-# No Conda/Mamba, EPEL, or RPM Fusion repositories are used.
+# Uses EPEL9 (libdav1d/libvpx/libaom packages) and the UBI9 CodeReady
+# Builder repo (-devel packages, builder stage only). No Conda/Mamba or
+# RPM Fusion.
 
 ARG UBI_PYTHON_IMAGE
 ARG FFMPEG_VERSION=7.1.1
@@ -31,6 +53,43 @@ RUN set -eux; \
       tar \
       xz \
       zlib-devel; \
+    dnf install -y --setopt=install_weak_deps=False \
+      https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm; \
+    CRB_REPO_ID="$(dnf repolist --all 2>/dev/null | awk 'tolower($0) ~ /(codeready|crb)/ && tolower($0) !~ /(debug|source)/ {print $1; exit}')"; \
+    echo "Detected CodeReady Builder repo id: ${CRB_REPO_ID:-<none found>}"; \
+    if [ -z "${CRB_REPO_ID}" ]; then \
+      echo "No CodeReady Builder / CRB repo found -- listing all repos for debugging:" >&2; \
+      dnf repolist --all >&2; \
+      exit 1; \
+    fi; \
+    # libdav1d-devel is REQUIRED: it's the confirmed fix for a real AV1
+    # decode failure (FFmpeg's own native AV1 decoder is *listed* by
+    # `ffmpeg -decoders` but does not actually decode all real-world AV1
+    # content -- see the top-of-file comment). Fail the build loudly if
+    # this specific package is missing rather than silently shipping the
+    # same broken decoder again.
+    dnf install -y --setopt=install_weak_deps=False \
+      --enablerepo="${CRB_REPO_ID}" \
+      libdav1d-devel; \
+    # libvpx-devel (VP9) and libaom-devel (AV1 encoder, used ONLY to
+    # build test fixtures below) are best-effort extras: this UBI9 CRB
+    # mirror does not always carry the same package set as a full RHEL
+    # subscription or CentOS Stream CRB. Missing them does not block the
+    # build -- FFmpeg is configured with only what actually installed.
+    HAVE_LIBVPX=0; \
+    if dnf install -y --setopt=install_weak_deps=False \
+        --enablerepo="${CRB_REPO_ID}" libvpx-devel; then \
+      HAVE_LIBVPX=1; \
+    else \
+      echo "WARNING: libvpx-devel unavailable -- building without VP9 support" >&2; \
+    fi; \
+    HAVE_LIBAOM=0; \
+    if dnf install -y --setopt=install_weak_deps=False \
+        --enablerepo="${CRB_REPO_ID}" libaom-devel; then \
+      HAVE_LIBAOM=1; \
+    else \
+      echo "WARNING: libaom-devel unavailable -- no AV1 test fixture will be generated (dav1d decode support is unaffected; only the encoder needed to synthesize a test file is missing)" >&2; \
+    fi; \
     dnf clean all; \
     rm -rf /var/cache/dnf; \
     curl -fL --retry 5 --retry-delay 2 \
@@ -41,26 +100,44 @@ RUN set -eux; \
       --strip-components=1 \
       -C /tmp/ffmpeg-src; \
     cd /tmp/ffmpeg-src; \
-    ./configure \
-      --prefix=/opt/ffmpeg \
-      --libdir=/opt/ffmpeg/lib64 \
-      --shlibdir=/opt/ffmpeg/lib64 \
-      --enable-shared \
-      --enable-zlib \
-      --disable-static \
-      --disable-debug \
-      --disable-doc \
-      --disable-htmlpages \
-      --disable-manpages \
-      --disable-podpages \
-      --disable-txtpages \
-      --disable-x86asm; \
+    CONFIGURE_FLAGS="--prefix=/opt/ffmpeg --libdir=/opt/ffmpeg/lib64 --shlibdir=/opt/ffmpeg/lib64 --enable-shared --enable-zlib --enable-libdav1d --disable-static --disable-debug --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-x86asm"; \
+    [ "${HAVE_LIBVPX}" = "1" ] && CONFIGURE_FLAGS="${CONFIGURE_FLAGS} --enable-libvpx"; \
+    [ "${HAVE_LIBAOM}" = "1" ] && CONFIGURE_FLAGS="${CONFIGURE_FLAGS} --enable-libaom"; \
+    echo "FFmpeg configure flags: ${CONFIGURE_FLAGS}"; \
+    ./configure ${CONFIGURE_FLAGS}; \
     make -j"$(getconf _NPROCESSORS_ONLN)"; \
     make install; \
     printf '%s\n' /opt/ffmpeg/lib64 > /etc/ld.so.conf.d/ffmpeg.conf; \
     ldconfig; \
     /opt/ffmpeg/bin/ffmpeg -version; \
-    find /opt/ffmpeg/lib64 -maxdepth 1 \( -type f -o -type l \) | sort
+    /opt/ffmpeg/bin/ffmpeg -decoders 2>&1 | grep -E '\bav1\b|\bvp9\b' || true; \
+    find /opt/ffmpeg/lib64 -maxdepth 1 \( -type f -o -type l \) | sort; \
+    mkdir -p /opt/codec-fixtures; \
+    if [ "${HAVE_LIBAOM}" = "1" ]; then \
+      /opt/ffmpeg/bin/ffmpeg \
+        -hide_banner \
+        -loglevel error \
+        -f lavfi \
+        -i testsrc2=size=256x256:rate=10 \
+        -t 1 \
+        -c:v libaom-av1 \
+        -cpu-used 8 \
+        -y \
+        /opt/codec-fixtures/av1-test.mp4; \
+    fi; \
+    if [ "${HAVE_LIBVPX}" = "1" ]; then \
+      /opt/ffmpeg/bin/ffmpeg \
+        -hide_banner \
+        -loglevel error \
+        -f lavfi \
+        -i testsrc2=size=256x256:rate=10 \
+        -t 1 \
+        -c:v libvpx-vp9 \
+        -y \
+        /opt/codec-fixtures/vp9-test.mp4; \
+    fi; \
+    printf '%s\n' "${HAVE_LIBVPX}" > /opt/codec-fixtures/.have-libvpx; \
+    printf '%s\n' "${HAVE_LIBAOM}" > /opt/codec-fixtures/.have-libaom
 
 FROM ${UBI_PYTHON_IMAGE}
 
@@ -84,6 +161,7 @@ ARG FFMPEG_VERSION
 USER 0
 
 COPY --from=ffmpeg-builder /opt/ffmpeg /opt/ffmpeg
+COPY --from=ffmpeg-builder /opt/codec-fixtures /opt/codec-fixtures
 RUN mkdir -p /opt/lerobot-tools && cat > /opt/lerobot-tools/compute_quantile_stats.py <<'COMPUTE_QUANTILE_STATS_EOF'
 #!/usr/bin/env python3
 """Compute q01/q10/q50/q90/q99 (and min/max/mean/std/count) statistics for
@@ -286,6 +364,8 @@ RUN set -eux; \
       *) echo "Unsupported TARGET_ARCH=${TARGET_ARCH}" >&2; exit 1 ;; \
     esac; \
     dnf install -y --setopt=install_weak_deps=False \
+      https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm; \
+    dnf install -y --setopt=install_weak_deps=False \
       ca-certificates \
       libusb1 \
       alsa-lib \
@@ -296,13 +376,22 @@ RUN set -eux; \
       libglvnd-glx \
       libjpeg-turbo \
       libpng \
-      pkgconf-pkg-config; \
+      pkgconf-pkg-config \
+      libdav1d; \
+    if [ "$(cat /opt/codec-fixtures/.have-libvpx 2>/dev/null)" = "1" ]; then \
+      dnf install -y --setopt=install_weak_deps=False libvpx; \
+    fi; \
+    if [ "$(cat /opt/codec-fixtures/.have-libaom 2>/dev/null)" = "1" ]; then \
+      dnf install -y --setopt=install_weak_deps=False libaom; \
+    fi; \
     dnf clean all; \
     rm -rf /var/cache/dnf; \
     printf '%s\n' /opt/ffmpeg/lib64 > /etc/ld.so.conf.d/ffmpeg.conf; \
     ldconfig; \
     /opt/ffmpeg/bin/ffmpeg -version; \
-    ldconfig -p | grep -E 'libav(codec|format|util)|libsw(scale|resample)'
+    ldconfig -p | grep -E 'libav(codec|format|util)|libsw(scale|resample)'; \
+    ldconfig -p | grep -E 'libdav1d|libvpx' || true; \
+    /opt/ffmpeg/bin/ffmpeg -decoders 2>&1 | grep -E '\bav1\b|\bvp9\b' || true
 
 # REMOVED ARGUMENT "CUDA_VISIBLE_DEVICES=0" TO ALLOW THIS IMAGE WORK WITH ANY NUMBER OF GPUS
 ENV PATH=/opt/ffmpeg/bin:${PATH} \
@@ -448,7 +537,36 @@ frame = decoder[0]
 print("TorchCodec decoded frame shape:", tuple(frame.shape))
 PYVERIFY
 
-RUN rm -f /tmp/torchcodec-smoke.mp4
+# AV1 and VP9 decode -- real, non-trivial content (moving test pattern, not
+# a single flat color), not just a check that the decoder is *listed*.
+# `ffmpeg -decoders` listing "av1"/"vp9" is NOT sufficient evidence the
+# decoder actually works: this exact gap (decoder listed, but failing on
+# real AV1 content with "Could not push packet to decoder: Function not
+# implemented") is what broke training on lerobot/libero before dav1d/vpx
+# were added here.
+RUN python - <<'PYVERIFY'
+from pathlib import Path
+
+from torchcodec.decoders import VideoDecoder
+
+fixtures = [("AV1", "/opt/codec-fixtures/av1-test.mp4"), ("VP9", "/opt/codec-fixtures/vp9-test.mp4")]
+tested_any = False
+
+for name, path in fixtures:
+    if not Path(path).exists():
+        print(f"{name} fixture not present (encoder unavailable at build time) -- skipping")
+        continue
+    tested_any = True
+    decoder = VideoDecoder(path)
+    assert decoder.metadata.codec == name.lower(), f"{path}: expected codec {name.lower()}, got {decoder.metadata.codec}"
+    frames = decoder.get_frames_at(indices=[0, 5, 9])
+    print(f"{name} decoded OK: codec={decoder.metadata.codec}, frames shape={tuple(frames.data.shape)}")
+
+if not tested_any:
+    print("NOTE: no AV1/VP9 fixtures were available to test -- libaom/libvpx were both unavailable at build time")
+PYVERIFY
+
+RUN rm -f /tmp/torchcodec-smoke.mp4 && rm -rf /opt/codec-fixtures
 
 # OpenShift commonly starts the image with an arbitrary UID in group 0.
 RUN mkdir -p \

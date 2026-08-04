@@ -218,12 +218,21 @@ oc apply -f ./k8s/storage-pvcs.yaml      # creating
 
 ## 10. Run download job
 ```bash
-oc apply -f ./k8s/download-job.yaml      # creating 
+oc process -f ./k8s/download-job-template.yaml \
+  -p MODEL_REPO_ID=lerobot/pi05_base \
+  -p DATASET_REPO_ID=lerobot/libero \
+  | oc create -f -
 ```
 
 ## 11. Run fine-tuning job
+## hint: CAMERA_MAP = {camera_name_from_dataset : camera_name_expected_by_VLA_model}
+
 ```bash
-oc apply -f ./k8s/training-job.yaml      # creating 
+oc process -f ./k8s/training-job-template.yaml \
+  -p MODEL_REPO_ID=lerobot/pi05_base \
+  -p DATASET_REPO_ID=lerobot/libero \
+  -p CAMERA_MAP='{"observation.images.image":"observation.images.base_0_rgb","observation.images.image2":"observation.images.left_wrist_0_rgb"}' \
+  | oc create -f -
 ```
 
 ## 12. Access to fine-tuned checkpoints
@@ -244,6 +253,17 @@ chmod +x ./k8s/pvc-download.sh
 ```bash
 ./k8s/pvc-download.sh --cleanup
 ```
+
+# Delete everything in project and the namespace itself
+```bash
+chmod +x ./k8s/nuke-namespace.sh 
+./k8s/nuke-namespace.sh <namespace>
+```
+Example: 
+https://huggingface.co/datasets/lerobot/liberochmod +x ./k8s/nuke-namespace.sh 
+./k8s/nuke-namespace.sh edushkin-vla-finetuning
+
+
 
 The final dot is the Podman build context. In the current setup it can be the local
 project directory containing the `Containerfile`.

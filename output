@@ -1,0 +1,2345 @@
+edushkin@edushkin-thinkpadp1gen7:~/Documents/projects/lerobot-vla-finetuning$ podman build \
+  --build-arg UBI_PYTHON_IMAGE="$UBI_PYTHON_IMAGE" \
+  --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
+  --build-arg PYTHON_ABI="$PYTHON_ABI" \
+  --build-arg CUDA_TOOLKIT_VERSION="$CUDA_TOOLKIT_VERSION" \
+  --build-arg PYTORCH_CUDA_BRANCH="$PYTORCH_CUDA_BRANCH" \
+  --build-arg PYTORCH_INDEX_URL="$PYTORCH_INDEX_URL" \
+  --build-arg TORCH_VERSION="$TORCH_VERSION" \
+  --build-arg TORCHVISION_VERSION="$TORCHVISION_VERSION" \
+  --build-arg TORCHCODEC_VERSION="$TORCHCODEC_VERSION" \
+  --build-arg NVIDIA_NPP_PACKAGE="$NVIDIA_NPP_PACKAGE" \
+  --build-arg NVIDIA_NPP_VERSION="$NVIDIA_NPP_VERSION" \
+  --build-arg LEROBOT_VERSION="$LEROBOT_VERSION" \
+  --build-arg TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
+  --build-arg GPU_COMPUTE_CAPABILITY="$GPU_COMPUTE_CAPABILITY" \
+  --build-arg GPU_SM="$GPU_SM" \
+  --build-arg TARGET_ARCH="$TARGET_ARCH" \
+  --build-arg LEROBOT_EXTRAS="all" \
+  --file Containerfile \
+  --tag lerobot-vla-finetuning:latest \
+  .
+[1/2] STEP 1/4: FROM registry.access.redhat.com/ubi9/ubi:latest AS ffmpeg-builder
+[1/2] STEP 2/4: ARG FFMPEG_VERSION
+--> Using cache 9c688a0bc90a51bc2ce61100d3874aeab6f091bc25a909f8594e27e757bf3618
+--> 9c688a0bc90a
+[1/2] STEP 3/4: USER 0
+--> Using cache bab2a8501db5e8aa13e35bea5921cfe4155fcd455ebe1a720b16d5a5834d9e94
+--> bab2a8501db5
+[1/2] STEP 4/4: RUN set -eux;     dnf install -y --setopt=install_weak_deps=False       ca-certificates       curl-minimal       diffutils       gcc       make       tar       xz       zlib-devel;     dnf install -y --setopt=install_weak_deps=False       https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm;     CRB_REPO_ID="$(dnf repolist --all 2>/dev/null | awk 'tolower($0) ~ /(codeready|crb)/ && tolower($0) !~ /(debug|source)/ {print $1; exit}')";     echo "Detected CodeReady Builder repo id: ${CRB_REPO_ID:-<none found>}";     if [ -z "${CRB_REPO_ID}" ]; then       echo "No CodeReady Builder / CRB repo found -- listing all repos for debugging:" >&2;       dnf repolist --all >&2;       exit 1;     fi;     dnf install -y --setopt=install_weak_deps=False       --enablerepo="${CRB_REPO_ID}"       libdav1d-devel;     HAVE_LIBVPX=0;     if dnf install -y --setopt=install_weak_deps=False         --enablerepo="${CRB_REPO_ID}" libvpx-devel; then       HAVE_LIBVPX=1;     else       echo "WARNING: libvpx-devel unavailable -- building without VP9 support" >&2;     fi;     HAVE_LIBAOM=0;     if dnf install -y --setopt=install_weak_deps=False         --enablerepo="${CRB_REPO_ID}" libaom-devel; then       HAVE_LIBAOM=1;     else       echo "WARNING: libaom-devel unavailable -- no AV1 test fixture will be generated (dav1d decode support is unaffected; only the encoder needed to synthesize a test file is missing)" >&2;     fi;     dnf clean all;     rm -rf /var/cache/dnf;     curl -fL --retry 5 --retry-delay 2       "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"       -o /tmp/ffmpeg.tar.xz;     mkdir -p /tmp/ffmpeg-src;     tar -xJf /tmp/ffmpeg.tar.xz       --strip-components=1       -C /tmp/ffmpeg-src;     cd /tmp/ffmpeg-src;     CONFIGURE_FLAGS="--prefix=/opt/ffmpeg --libdir=/opt/ffmpeg/lib64 --shlibdir=/opt/ffmpeg/lib64 --enable-shared --enable-zlib --enable-libdav1d --disable-static --disable-debug --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-x86asm";     [ "${HAVE_LIBVPX}" = "1" ] && CONFIGURE_FLAGS="${CONFIGURE_FLAGS} --enable-libvpx";     [ "${HAVE_LIBAOM}" = "1" ] && CONFIGURE_FLAGS="${CONFIGURE_FLAGS} --enable-libaom";     echo "FFmpeg configure flags: ${CONFIGURE_FLAGS}";     ./configure ${CONFIGURE_FLAGS};     make -j"$(getconf _NPROCESSORS_ONLN)";     make install;     printf '%s\n' /opt/ffmpeg/lib64 > /etc/ld.so.conf.d/ffmpeg.conf;     ldconfig;     /opt/ffmpeg/bin/ffmpeg -version;     /opt/ffmpeg/bin/ffmpeg -decoders 2>&1 | grep -E '\bav1\b|\bvp9\b' || true;     find /opt/ffmpeg/lib64 -maxdepth 1 \( -type f -o -type l \) | sort;     mkdir -p /opt/codec-fixtures;     if [ "${HAVE_LIBAOM}" = "1" ]; then       /opt/ffmpeg/bin/ffmpeg         -hide_banner         -loglevel error         -f lavfi         -i testsrc2=size=256x256:rate=10         -t 1         -c:v libaom-av1         -cpu-used 8         -y         /opt/codec-fixtures/av1-test.mp4;     fi;     if [ "${HAVE_LIBVPX}" = "1" ]; then       /opt/ffmpeg/bin/ffmpeg         -hide_banner         -loglevel error         -f lavfi         -i testsrc2=size=256x256:rate=10         -t 1         -c:v libvpx-vp9         -y         /opt/codec-fixtures/vp9-test.mp4;     fi;     printf '%s\n' "${HAVE_LIBVPX}" > /opt/codec-fixtures/.have-libvpx;     printf '%s\n' "${HAVE_LIBAOM}" > /opt/codec-fixtures/.have-libaom
+--> Using cache 41c296344face0e7fa07e76310500f8b3761164f91ea99b3e205d3bb07bce7c0
+--> 41c296344fac
+[2/2] STEP 1/36: FROM registry.access.redhat.com/ubi9/python-312:latest
+[2/2] STEP 2/36: ARG PYTHON_VERSION
+--> Using cache 87bbc21fdf9efc0a48547f318773846b3f86f9bc199b562c0ae841d4be117d02
+--> 87bbc21fdf9e
+[2/2] STEP 3/36: ARG PYTHON_ABI
+--> Using cache eadda45bb627962c98719d488ab167c4a8a30e3a9fb3702631cb69f615ac4ec8
+--> eadda45bb627
+[2/2] STEP 4/36: ARG PYTORCH_CUDA_BRANCH
+--> Using cache 707bb9e70f776621b11105b0f063173770edc15dc757233a9f058318645fc8be
+--> 707bb9e70f77
+[2/2] STEP 5/36: ARG PYTORCH_INDEX_URL
+--> Using cache ecd7db10a55f79e575402ab1a1abc3d6170b6bc76550631eba64bd41b30f5c25
+--> ecd7db10a55f
+[2/2] STEP 6/36: ARG TORCH_VERSION
+--> Using cache 96195cfc5c651e990d485f6a21b53c1363ede9145581fd8ce8a0a89613ed4d37
+--> 96195cfc5c65
+[2/2] STEP 7/36: ARG TORCHVISION_VERSION
+--> Using cache 876c2515ea7c74f3dce79ccde986dd02c95e1da1a2d3d80803809083988bbd93
+--> 876c2515ea7c
+[2/2] STEP 8/36: ARG TORCH_CUDA_ARCH_LIST
+--> Using cache c92c8cc18677bc8ff36393afedfad6f1d67c7fbdca0ee67abba7798a5fd39956
+--> c92c8cc18677
+[2/2] STEP 9/36: ARG GPU_COMPUTE_CAPABILITY
+--> Using cache c98537add4a0c3e1b84cc513dcbbaf657587deb2a584d65923f91ae23ca2e7c2
+--> c98537add4a0
+[2/2] STEP 10/36: ARG GPU_SM
+--> Using cache 99cd8fc58c64a90ec3d338e7e50d20733712b35d7ff3fca0cfcef6a8056c59ad
+--> 99cd8fc58c64
+[2/2] STEP 11/36: ARG TARGET_ARCH=x86_64
+--> Using cache 9b2b929d26d004e7d17f19e086a30897f89c37733cb01f0c36328ea79a7d4dd3
+--> 9b2b929d26d0
+[2/2] STEP 12/36: ARG LEROBOT_VERSION
+--> Using cache 23439b823a1be2b5d95aa8840b3016d2f128040a6b69fbbd45a2e915038691f8
+--> 23439b823a1b
+[2/2] STEP 13/36: ARG LEROBOT_EXTRAS=training
+--> Using cache 98b3dc6eb4be8c223eff016e60a77501009e2228bac4ebb28b2d9935cf5d691a
+--> 98b3dc6eb4be
+[2/2] STEP 14/36: ARG TORCHCODEC_VERSION
+--> Using cache 26d13cbed5b363e9a71696af94663df71d5fa20f0742afbbb2f90633dd55e294
+--> 26d13cbed5b3
+[2/2] STEP 15/36: ARG NVIDIA_NPP_PACKAGE
+--> Using cache b1a6cefcbe4d9f826cd1a5d3efc749ed6fd93cdf457b50c9b09c6aa46eda9d40
+--> b1a6cefcbe4d
+[2/2] STEP 16/36: ARG NVIDIA_NPP_VERSION
+--> Using cache 6201935df1048ecc8038e19200c1e855ac6281c2b8f20f65b2b1c9e04962cf58
+--> 6201935df104
+[2/2] STEP 17/36: ARG FFMPEG_VERSION
+--> Using cache 23ea824aef389886d67942c6da981315e360888a37a27f662619eb0294ac5498
+--> 23ea824aef38
+[2/2] STEP 18/36: USER 0
+--> Using cache 78956db723ba7a4b150adc5bb7eec8b658c0bbd432787ed555ed84b43062df6d
+--> 78956db723ba
+[2/2] STEP 19/36: COPY --from=ffmpeg-builder /opt/ffmpeg /opt/ffmpeg
+--> Using cache 245fc620273b39eeba26e9cf22f890509e759229359d21aadf97b04cfd9456e8
+--> 245fc620273b
+[2/2] STEP 20/36: COPY --from=ffmpeg-builder /opt/codec-fixtures /opt/codec-fixtures
+--> Using cache 9be4703f7b77135d8155fc374041a7301d2e3bfe6c416fec6df42e1718a91ac4
+--> 9be4703f7b77
+[2/2] STEP 21/36: RUN mkdir -p /opt/lerobot-tools && cat > /opt/lerobot-tools/compute_quantile_stats.py <<'COMPUTE_QUANTILE_STATS_EOF' (#!/usr/bin/env python3...)
+--> 33eabef12fb3
+[2/2] STEP 22/36: RUN set -eux;     : "${PYTHON_VERSION:?PYTHON_VERSION build argument is required}";     : "${PYTHON_ABI:?PYTHON_ABI build argument is required}";     : "${PYTORCH_INDEX_URL:?PYTORCH_INDEX_URL build argument is required}";     : "${TORCH_VERSION:?TORCH_VERSION build argument is required}";     : "${TORCHVISION_VERSION:?TORCHVISION_VERSION build argument is required}";     : "${LEROBOT_VERSION:?LEROBOT_VERSION build argument is required}";     : "${PYTORCH_CUDA_BRANCH:?PYTORCH_CUDA_BRANCH build argument is required}";     : "${TORCHCODEC_VERSION:?TORCHCODEC_VERSION build argument is required}";     : "${NVIDIA_NPP_PACKAGE:?NVIDIA_NPP_PACKAGE build argument is required}";     : "${NVIDIA_NPP_VERSION:?NVIDIA_NPP_VERSION build argument is required}";     case "${TARGET_ARCH}" in       x86_64) ;;       aarch64) echo "TARGET_ARCH=aarch64 unsupported: TorchCodec has no Linux ARM wheels (see https://huggingface.co/docs/lerobot/en/installation); use versions.env from the resolver, which already rejects aarch64" >&2; exit 1 ;;       *) echo "Unsupported TARGET_ARCH=${TARGET_ARCH}" >&2; exit 1 ;;     esac;     dnf install -y --setopt=install_weak_deps=False       https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm;     dnf install -y --setopt=install_weak_deps=False       ca-certificates       libusb1       alsa-lib       libsndfile       mesa-libEGL       mesa-libGL       libglvnd-egl       libglvnd-glx       libjpeg-turbo       libpng       pkgconf-pkg-config       libdav1d;     if [ "$(cat /opt/codec-fixtures/.have-libvpx 2>/dev/null)" = "1" ]; then       dnf install -y --setopt=install_weak_deps=False libvpx;     fi;     if [ "$(cat /opt/codec-fixtures/.have-libaom 2>/dev/null)" = "1" ]; then       dnf install -y --setopt=install_weak_deps=False libaom;     fi;     dnf clean all;     rm -rf /var/cache/dnf;     printf '%s\n' /opt/ffmpeg/lib64 > /etc/ld.so.conf.d/ffmpeg.conf;     ldconfig;     /opt/ffmpeg/bin/ffmpeg -version;     ldconfig -p | grep -E 'libav(codec|format|util)|libsw(scale|resample)';     ldconfig -p | grep -E 'libdav1d|libvpx' || true;     /opt/ffmpeg/bin/ffmpeg -decoders 2>&1 | grep -E '\bav1\b|\bvp9\b' || true
++ : 3.12
++ : cp312
++ : https://download.pytorch.org/whl/cu128
++ : 2.11.0+cu128
++ : 0.26.0+cu128
++ : 0.6.0
++ : cu128
++ : 0.11.1+cu128
++ : nvidia-npp-cu12
++ : 12.4.1.87
++ case "${TARGET_ARCH}" in
++ dnf install -y --setopt=install_weak_deps=False https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+Updating Subscription Management repositories.
+Unable to read consumer identity
+
+This system is not registered with an entitlement server. You can use subscription-manager to register.
+
+Red Hat Universal Base Image 9 (RPMs) - BaseOS  2.8 MB/s | 534 kB     00:00    
+Red Hat Universal Base Image 9 (RPMs) - AppStre  12 MB/s | 2.9 MB     00:00    
+Red Hat Universal Base Image 9 (RPMs) - CodeRea 3.0 MB/s | 470 kB     00:00    
+epel-release-latest-9.noarch.rpm                 39 kB/s |  19 kB     00:00    
+Dependencies resolved.
+================================================================================
+ Package             Architecture  Version            Repository           Size
+================================================================================
+Installing:
+ epel-release        noarch        9-11.el9           @commandline         19 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+
+Total size: 19 k
+Installed size: 26 k
+Downloading Packages:
+Running transaction check
+Transaction check succeeded.
+Running transaction test
+Transaction test succeeded.
+Running transaction
+  Preparing        :                                                        1/1 
+  Installing       : epel-release-9-11.el9.noarch                           1/1 
+  Running scriptlet: epel-release-9-11.el9.noarch                           1/1 
+Many EPEL packages require the CodeReady Builder (CRB) repository.
+It is recommended that you run /usr/bin/crb enable to enable the CRB repository.
+
+  Verifying        : epel-release-9-11.el9.noarch                           1/1 
+Installed products updated.
+
+Installed:
+  epel-release-9-11.el9.noarch                                                  
+
+Complete!
++ dnf install -y --setopt=install_weak_deps=False ca-certificates libusb1 alsa-lib libsndfile mesa-libEGL mesa-libGL libglvnd-egl libglvnd-glx libjpeg-turbo libpng pkgconf-pkg-config libdav1d
+Updating Subscription Management repositories.
+Unable to read consumer identity
+
+This system is not registered with an entitlement server. You can use subscription-manager to register.
+
+Extra Packages for Enterprise Linux 9 - x86_64   11 MB/s |  21 MB     00:01    
+Extra Packages for Enterprise Linux 9 openh264  5.5 kB/s | 2.5 kB     00:00    
+Package ca-certificates-2025.2.80_v9.0.305-91.el9.noarch is already installed.
+Package libjpeg-turbo-2.0.90-7.el9.x86_64 is already installed.
+Package libpng-2:1.6.37-15.el9_8.2.x86_64 is already installed.
+Package pkgconf-pkg-config-1.7.3-10.el9.x86_64 is already installed.
+Dependencies resolved.
+================================================================================
+ Package             Arch     Version              Repository              Size
+================================================================================
+Installing:
+ alsa-lib            x86_64   1.2.15.3-1.el9       ubi-9-appstream-rpms   551 k
+ libdav1d            x86_64   1.5.3-1.el9          epel                   610 k
+ libglvnd-egl        x86_64   1:1.3.4-1.el9        ubi-9-appstream-rpms    39 k
+ libglvnd-glx        x86_64   1:1.3.4-1.el9        ubi-9-appstream-rpms   147 k
+ libsndfile          x86_64   1.0.31-9.el9_8.1     ubi-9-appstream-rpms   211 k
+ libusbx             x86_64   1.0.30-1.el9_8       ubi-9-baseos-rpms       84 k
+ mesa-libEGL         x86_64   25.2.7-4.el9         ubi-9-appstream-rpms   133 k
+ mesa-libGL          x86_64   25.2.7-4.el9         ubi-9-appstream-rpms   124 k
+Installing dependencies:
+ flac-libs           x86_64   1.3.3-10.el9_2.1     ubi-9-appstream-rpms   221 k
+ gsm                 x86_64   1.0.19-6.el9         ubi-9-appstream-rpms    36 k
+ hwdata              noarch   0.348-9.22.el9       ubi-9-baseos-rpms      1.7 M
+ libXxf86vm          x86_64   1.1.4-18.el9         ubi-9-appstream-rpms    21 k
+ libdrm              x86_64   2.4.123-2.el9        ubi-9-appstream-rpms   165 k
+ libglvnd            x86_64   1:1.3.4-1.el9        ubi-9-appstream-rpms   137 k
+ libogg              x86_64   2:1.3.4-6.el9        ubi-9-appstream-rpms    36 k
+ libpciaccess        x86_64   0.16-7.el9           ubi-9-baseos-rpms       29 k
+ libvorbis           x86_64   1:1.3.7-5.el9        ubi-9-appstream-rpms   197 k
+ libwayland-client   x86_64   1.21.0-1.el9         ubi-9-appstream-rpms    35 k
+ libxshmfence        x86_64   1.3-10.el9           ubi-9-appstream-rpms    14 k
+ mesa-dri-drivers    x86_64   25.2.7-4.el9         ubi-9-appstream-rpms   9.3 M
+ mesa-filesystem     x86_64   25.2.7-4.el9         ubi-9-appstream-rpms    17 k
+ mesa-libgbm         x86_64   25.2.7-4.el9         ubi-9-appstream-rpms    23 k
+ opus                x86_64   1.3.1-10.el9         ubi-9-appstream-rpms   201 k
+ spirv-tools-libs    x86_64   2025.4-1.el9         ubi-9-appstream-rpms   1.5 M
+
+Transaction Summary
+================================================================================
+Install  24 Packages
+
+Total download size: 15 M
+Installed size: 62 M
+Downloading Packages:
+(1/24): libpciaccess-0.16-7.el9.x86_64.rpm      366 kB/s |  29 kB     00:00    
+(2/24): libusbx-1.0.30-1.el9_8.x86_64.rpm       2.0 MB/s |  84 kB     00:00    
+(3/24): flac-libs-1.3.3-10.el9_2.1.x86_64.rpm   3.2 MB/s | 221 kB     00:00    
+(4/24): gsm-1.0.19-6.el9.x86_64.rpm             1.0 MB/s |  36 kB     00:00    
+(5/24): hwdata-0.348-9.22.el9.noarch.rpm        7.2 MB/s | 1.7 MB     00:00    
+(6/24): libXxf86vm-1.1.4-18.el9.x86_64.rpm      1.0 MB/s |  21 kB     00:00    
+(7/24): libdrm-2.4.123-2.el9.x86_64.rpm         7.9 MB/s | 165 kB     00:00    
+(8/24): libglvnd-egl-1.3.4-1.el9.x86_64.rpm     2.2 MB/s |  39 kB     00:00    
+(9/24): libglvnd-1.3.4-1.el9.x86_64.rpm         4.8 MB/s | 137 kB     00:00    
+(10/24): libogg-1.3.4-6.el9.x86_64.rpm          1.6 MB/s |  36 kB     00:00    
+(11/24): libglvnd-glx-1.3.4-1.el9.x86_64.rpm    6.1 MB/s | 147 kB     00:00    
+(12/24): libwayland-client-1.21.0-1.el9.x86_64. 2.1 MB/s |  35 kB     00:00    
+(13/24): libvorbis-1.3.7-5.el9.x86_64.rpm       6.9 MB/s | 197 kB     00:00    
+(14/24): libxshmfence-1.3-10.el9.x86_64.rpm     911 kB/s |  14 kB     00:00    
+(15/24): opus-1.3.1-10.el9.x86_64.rpm           4.0 MB/s | 201 kB     00:00    
+(16/24): alsa-lib-1.2.15.3-1.el9.x86_64.rpm     9.2 MB/s | 551 kB     00:00    
+(17/24): libsndfile-1.0.31-9.el9_8.1.x86_64.rpm 5.7 MB/s | 211 kB     00:00    
+(18/24): libdav1d-1.5.3-1.el9.x86_64.rpm        1.3 MB/s | 610 kB     00:00    
+(19/24): mesa-filesystem-25.2.7-4.el9.x86_64.rp 404 kB/s |  17 kB     00:00    
+(20/24): mesa-libEGL-25.2.7-4.el9.x86_64.rpm    2.6 MB/s | 133 kB     00:00    
+(21/24): mesa-libgbm-25.2.7-4.el9.x86_64.rpm    513 kB/s |  23 kB     00:00    
+(22/24): mesa-libGL-25.2.7-4.el9.x86_64.rpm     501 kB/s | 124 kB     00:00    
+(23/24): spirv-tools-libs-2025.4-1.el9.x86_64.r 4.7 MB/s | 1.5 MB     00:00    
+(24/24): mesa-dri-drivers-25.2.7-4.el9.x86_64.r  15 MB/s | 9.3 MB     00:00    
+--------------------------------------------------------------------------------
+Total                                            14 MB/s |  15 MB     00:01     
+Extra Packages for Enterprise Linux 9 - x86_64  1.6 MB/s | 1.6 kB     00:00    
+Importing GPG key 0x3228467C:
+ Userid     : "Fedora (epel9) <epel@fedoraproject.org>"
+ Fingerprint: FF8A D134 4597 106E CE81 3B91 8A38 72BF 3228 467C
+ From       : /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-9
+Key imported successfully
+Running transaction check
+Transaction check succeeded.
+Running transaction test
+Transaction test succeeded.
+Running transaction
+  Preparing        :                                                        1/1 
+  Installing       : libogg-2:1.3.4-6.el9.x86_64                           1/24 
+  Installing       : libglvnd-1:1.3.4-1.el9.x86_64                         2/24 
+  Installing       : flac-libs-1.3.3-10.el9_2.1.x86_64                     3/24 
+  Installing       : libvorbis-1:1.3.7-5.el9.x86_64                        4/24 
+  Installing       : spirv-tools-libs-2025.4-1.el9.x86_64                  5/24 
+  Installing       : mesa-filesystem-25.2.7-4.el9.x86_64                   6/24 
+  Installing       : opus-1.3.1-10.el9.x86_64                              7/24 
+  Installing       : libxshmfence-1.3-10.el9.x86_64                        8/24 
+  Installing       : libwayland-client-1.21.0-1.el9.x86_64                 9/24 
+  Installing       : libXxf86vm-1.1.4-18.el9.x86_64                       10/24 
+  Installing       : gsm-1.0.19-6.el9.x86_64                              11/24 
+  Installing       : hwdata-0.348-9.22.el9.noarch                         12/24 
+  Installing       : libpciaccess-0.16-7.el9.x86_64                       13/24 
+  Installing       : libdrm-2.4.123-2.el9.x86_64                          14/24 
+  Installing       : libglvnd-egl-1:1.3.4-1.el9.x86_64                    15/24 
+  Installing       : mesa-dri-drivers-25.2.7-4.el9.x86_64                 16/24 
+  Installing       : mesa-libgbm-25.2.7-4.el9.x86_64                      17/24 
+  Installing       : mesa-libEGL-25.2.7-4.el9.x86_64                      18/24 
+  Installing       : libglvnd-glx-1:1.3.4-1.el9.x86_64                    19/24 
+  Installing       : mesa-libGL-25.2.7-4.el9.x86_64                       20/24 
+  Installing       : libsndfile-1.0.31-9.el9_8.1.x86_64                   21/24 
+  Installing       : alsa-lib-1.2.15.3-1.el9.x86_64                       22/24 
+  Installing       : libusbx-1.0.30-1.el9_8.x86_64                        23/24 
+  Installing       : libdav1d-1.5.3-1.el9.x86_64                          24/24 
+  Running scriptlet: libdav1d-1.5.3-1.el9.x86_64                          24/24 
+  Verifying        : libdav1d-1.5.3-1.el9.x86_64                           1/24 
+  Verifying        : hwdata-0.348-9.22.el9.noarch                          2/24 
+  Verifying        : libpciaccess-0.16-7.el9.x86_64                        3/24 
+  Verifying        : libusbx-1.0.30-1.el9_8.x86_64                         4/24 
+  Verifying        : flac-libs-1.3.3-10.el9_2.1.x86_64                     5/24 
+  Verifying        : gsm-1.0.19-6.el9.x86_64                               6/24 
+  Verifying        : libXxf86vm-1.1.4-18.el9.x86_64                        7/24 
+  Verifying        : libdrm-2.4.123-2.el9.x86_64                           8/24 
+  Verifying        : libglvnd-1:1.3.4-1.el9.x86_64                         9/24 
+  Verifying        : libglvnd-egl-1:1.3.4-1.el9.x86_64                    10/24 
+  Verifying        : libglvnd-glx-1:1.3.4-1.el9.x86_64                    11/24 
+  Verifying        : libogg-2:1.3.4-6.el9.x86_64                          12/24 
+  Verifying        : libvorbis-1:1.3.7-5.el9.x86_64                       13/24 
+  Verifying        : libwayland-client-1.21.0-1.el9.x86_64                14/24 
+  Verifying        : libxshmfence-1.3-10.el9.x86_64                       15/24 
+  Verifying        : opus-1.3.1-10.el9.x86_64                             16/24 
+  Verifying        : alsa-lib-1.2.15.3-1.el9.x86_64                       17/24 
+  Verifying        : libsndfile-1.0.31-9.el9_8.1.x86_64                   18/24 
+  Verifying        : mesa-dri-drivers-25.2.7-4.el9.x86_64                 19/24 
+  Verifying        : mesa-filesystem-25.2.7-4.el9.x86_64                  20/24 
+  Verifying        : mesa-libEGL-25.2.7-4.el9.x86_64                      21/24 
+  Verifying        : mesa-libGL-25.2.7-4.el9.x86_64                       22/24 
+  Verifying        : mesa-libgbm-25.2.7-4.el9.x86_64                      23/24 
+  Verifying        : spirv-tools-libs-2025.4-1.el9.x86_64                 24/24 
+Installed products updated.
+
+Installed:
+  alsa-lib-1.2.15.3-1.el9.x86_64        flac-libs-1.3.3-10.el9_2.1.x86_64      
+  gsm-1.0.19-6.el9.x86_64               hwdata-0.348-9.22.el9.noarch           
+  libXxf86vm-1.1.4-18.el9.x86_64        libdav1d-1.5.3-1.el9.x86_64            
+  libdrm-2.4.123-2.el9.x86_64           libglvnd-1:1.3.4-1.el9.x86_64          
+  libglvnd-egl-1:1.3.4-1.el9.x86_64     libglvnd-glx-1:1.3.4-1.el9.x86_64      
+  libogg-2:1.3.4-6.el9.x86_64           libpciaccess-0.16-7.el9.x86_64         
+  libsndfile-1.0.31-9.el9_8.1.x86_64    libusbx-1.0.30-1.el9_8.x86_64          
+  libvorbis-1:1.3.7-5.el9.x86_64        libwayland-client-1.21.0-1.el9.x86_64  
+  libxshmfence-1.3-10.el9.x86_64        mesa-dri-drivers-25.2.7-4.el9.x86_64   
+  mesa-filesystem-25.2.7-4.el9.x86_64   mesa-libEGL-25.2.7-4.el9.x86_64        
+  mesa-libGL-25.2.7-4.el9.x86_64        mesa-libgbm-25.2.7-4.el9.x86_64        
+  opus-1.3.1-10.el9.x86_64              spirv-tools-libs-2025.4-1.el9.x86_64   
+
+Complete!
+++ cat /opt/codec-fixtures/.have-libvpx
++ '[' 0 = 1 ']'
+++ cat /opt/codec-fixtures/.have-libaom
++ '[' 1 = 1 ']'
++ dnf install -y --setopt=install_weak_deps=False libaom
+Updating Subscription Management repositories.
+Unable to read consumer identity
+
+This system is not registered with an entitlement server. You can use subscription-manager to register.
+
+Last metadata expiration check: 0:00:03 ago on Tue 04 Aug 2026 01:15:41 PM UTC.
+Dependencies resolved.
+================================================================================
+ Package              Arch       Version            Repository             Size
+================================================================================
+Installing:
+ libaom               x86_64     3.13.1-1.el9       epel                  1.8 M
+Installing dependencies:
+ highway              x86_64     1.3.0-1.el9        epel                  553 k
+ libjxl               x86_64     0.7.2-2.el9        epel                  982 k
+ libvmaf              x86_64     2.3.0-2.el9        epel                  177 k
+ shared-mime-info     x86_64     2.1-5.el9          ubi-9-baseos-rpms     561 k
+
+Transaction Summary
+================================================================================
+Install  5 Packages
+
+Total download size: 4.0 M
+Installed size: 18 M
+Downloading Packages:
+(1/5): highway-1.3.0-1.el9.x86_64.rpm           1.7 MB/s | 553 kB     00:00    
+(2/5): libvmaf-2.3.0-2.el9.x86_64.rpm           1.6 MB/s | 177 kB     00:00    
+(3/5): libjxl-0.7.2-2.el9.x86_64.rpm            2.2 MB/s | 982 kB     00:00    
+(4/5): libaom-3.13.1-1.el9.x86_64.rpm           3.3 MB/s | 1.8 MB     00:00    
+(5/5): shared-mime-info-2.1-5.el9.x86_64.rpm    3.7 MB/s | 561 kB     00:00    
+--------------------------------------------------------------------------------
+Total                                           5.8 MB/s | 4.0 MB     00:00     
+Running transaction check
+Transaction check succeeded.
+Running transaction test
+Transaction test succeeded.
+Running transaction
+  Preparing        :                                                        1/1 
+  Installing       : shared-mime-info-2.1-5.el9.x86_64                      1/5 
+  Running scriptlet: shared-mime-info-2.1-5.el9.x86_64                      1/5 
+  Installing       : libvmaf-2.3.0-2.el9.x86_64                             2/5 
+  Installing       : highway-1.3.0-1.el9.x86_64                             3/5 
+  Installing       : libjxl-0.7.2-2.el9.x86_64                              4/5 
+  Installing       : libaom-3.13.1-1.el9.x86_64                             5/5 
+  Running scriptlet: libaom-3.13.1-1.el9.x86_64                             5/5 
+  Verifying        : highway-1.3.0-1.el9.x86_64                             1/5 
+  Verifying        : libaom-3.13.1-1.el9.x86_64                             2/5 
+  Verifying        : libjxl-0.7.2-2.el9.x86_64                              3/5 
+  Verifying        : libvmaf-2.3.0-2.el9.x86_64                             4/5 
+  Verifying        : shared-mime-info-2.1-5.el9.x86_64                      5/5 
+Installed products updated.
+
+Installed:
+  highway-1.3.0-1.el9.x86_64                 libaom-3.13.1-1.el9.x86_64         
+  libjxl-0.7.2-2.el9.x86_64                  libvmaf-2.3.0-2.el9.x86_64         
+  shared-mime-info-2.1-5.el9.x86_64         
+
+Complete!
++ dnf clean all
+Updating Subscription Management repositories.
+Unable to read consumer identity
+
+This system is not registered with an entitlement server. You can use subscription-manager to register.
+
+42 files removed
++ rm -rf /var/cache/dnf
++ printf '%s\n' /opt/ffmpeg/lib64
++ ldconfig
++ /opt/ffmpeg/bin/ffmpeg -version
+ffmpeg version 7.1.1 Copyright (c) 2000-2025 the FFmpeg developers
+built with gcc 11 (GCC)
+configuration: --prefix=/opt/ffmpeg --libdir=/opt/ffmpeg/lib64 --shlibdir=/opt/ffmpeg/lib64 --enable-shared --enable-zlib --enable-libdav1d --disable-static --disable-debug --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages --disable-x86asm --enable-libaom
+libavutil      59. 39.100 / 59. 39.100
+libavcodec     61. 19.101 / 61. 19.101
+libavformat    61.  7.100 / 61.  7.100
+libavdevice    61.  3.100 / 61.  3.100
+libavfilter    10.  4.100 / 10.  4.100
+libswscale      8.  3.100 /  8.  3.100
+libswresample   5.  3.100 /  5.  3.100
++ ldconfig -p
++ grep -E 'libav(codec|format|util)|libsw(scale|resample)'
+	libswscale.so.8 (libc6,x86-64) => /opt/ffmpeg/lib64/libswscale.so.8
+	libswscale.so (libc6,x86-64) => /opt/ffmpeg/lib64/libswscale.so
+	libswresample.so.5 (libc6,x86-64) => /opt/ffmpeg/lib64/libswresample.so.5
+	libswresample.so (libc6,x86-64) => /opt/ffmpeg/lib64/libswresample.so
+	libavutil.so.59 (libc6,x86-64) => /opt/ffmpeg/lib64/libavutil.so.59
+	libavutil.so (libc6,x86-64) => /opt/ffmpeg/lib64/libavutil.so
+	libavformat.so.61 (libc6,x86-64) => /opt/ffmpeg/lib64/libavformat.so.61
+	libavformat.so (libc6,x86-64) => /opt/ffmpeg/lib64/libavformat.so
+	libavcodec.so.61 (libc6,x86-64) => /opt/ffmpeg/lib64/libavcodec.so.61
+	libavcodec.so (libc6,x86-64) => /opt/ffmpeg/lib64/libavcodec.so
++ ldconfig -p
++ grep -E 'libdav1d|libvpx'
+	libdav1d.so.7 (libc6,x86-64) => /lib64/libdav1d.so.7
++ /opt/ffmpeg/bin/ffmpeg -decoders
++ grep -E '\bav1\b|\bvp9\b'
+ V..... libdav1d             dav1d AV1 decoder by VideoLAN (codec av1)
+ V....D libaom-av1           libaom AV1 (codec av1)
+ V....D av1                  Alliance for Open Media AV1
+ VFS..D vp9                  Google VP9
+ V..... vp9_v4l2m2m          V4L2 mem2mem VP9 decoder wrapper (codec vp9)
+--> 37879578e375
+[2/2] STEP 23/36: ENV PATH=/opt/ffmpeg/bin:${PATH}     LD_LIBRARY_PATH=/opt/ffmpeg/lib64:${LD_LIBRARY_PATH}     PKG_CONFIG_PATH=/opt/ffmpeg/lib64/pkgconfig     TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}     MUJOCO_GL=egl     PYOPENGL_PLATFORM=egl     DEVICE=cuda     PIP_DISABLE_PIP_VERSION_CHECK=1     PIP_NO_CACHE_DIR=1     PYTHONUNBUFFERED=1     PYTHONDONTWRITEBYTECODE=1     HF_HOME=/workspace/.cache/huggingface     HF_LEROBOT_HOME=/workspace/.cache/huggingface/lerobot     TRANSFORMERS_CACHE=/workspace/.cache/huggingface/transformers     TORCH_HOME=/workspace/.cache/torch     TRITON_CACHE_DIR=/workspace/.cache/triton     XDG_CACHE_HOME=/workspace/.cache
+--> 4ef430fe8c4b
+[2/2] STEP 24/36: WORKDIR /workspace
+--> b7d64f23830c
+[2/2] STEP 25/36: RUN PYTHON_VERSION="${PYTHON_VERSION}" python - <<'PYVERIFY' (import os...)
+Resolved Python validated: 3.12
+--> c9a8451eaf09
+[2/2] STEP 26/36: RUN set -eux;     python -m pip install       --extra-index-url "${PYTORCH_INDEX_URL}"       "torch==${TORCH_VERSION}"       "torchvision==${TORCHVISION_VERSION}"       "lerobot[${LEROBOT_EXTRAS}]==${LEROBOT_VERSION}";     python -m pip install       --force-reinstall       --no-deps       --index-url "${PYTORCH_INDEX_URL}"       "torchcodec==${TORCHCODEC_VERSION}";     python -m pip install       --no-deps       "${NVIDIA_NPP_PACKAGE}==${NVIDIA_NPP_VERSION}";     find "$(python -c 'import sys; print(sys.prefix)')"       -type f       -path '*/triton/backends/nvidia/bin/ptxas'       -exec chmod +x {} +;     SITE_PACKAGES="$(python -c 'import site; print(site.getsitepackages()[0])')";     test -d "${SITE_PACKAGES}/nvidia/npp/lib";     printf '%s\n' "${SITE_PACKAGES}/nvidia/npp/lib"       > /etc/ld.so.conf.d/nvidia-npp-python.conf;     find "${SITE_PACKAGES}/nvidia/npp/lib"       -maxdepth 1       -type f       -name 'libnpp*.so*'       -print;     ldconfig;     NPP_CUDA_MAJOR="${NVIDIA_NPP_PACKAGE##*-cu}";     ldconfig -p | grep "libnppicc.so.${NPP_CUDA_MAJOR}";     TORCH_VERSION="${TORCH_VERSION}"     TORCHVISION_VERSION="${TORCHVISION_VERSION}"     LEROBOT_VERSION="${LEROBOT_VERSION}"     TORCHCODEC_VERSION="${TORCHCODEC_VERSION}"     python - <<'PYVERIFY' (import importlib.metadata as metadata...)
++ python -m pip install --extra-index-url https://download.pytorch.org/whl/cu128 torch==2.11.0+cu128 torchvision==0.26.0+cu128 'lerobot[all]==0.6.0'
+Looking in indexes: https://pypi.org/simple, https://download.pytorch.org/whl/cu128
+Collecting torch==2.11.0+cu128
+  Downloading https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (29 kB)
+Collecting torchvision==0.26.0+cu128
+  Downloading https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (5.5 kB)
+Collecting lerobot==0.6.0 (from lerobot[all]==0.6.0)
+  Downloading lerobot-0.6.0-py3-none-any.whl.metadata (28 kB)
+Collecting filelock (from torch==2.11.0+cu128)
+  Downloading filelock-3.32.2-py3-none-any.whl.metadata (2.0 kB)
+Collecting typing-extensions>=4.10.0 (from torch==2.11.0+cu128)
+  Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting setuptools<82 (from torch==2.11.0+cu128)
+  Downloading setuptools-81.0.0-py3-none-any.whl.metadata (6.6 kB)
+Collecting sympy>=1.13.3 (from torch==2.11.0+cu128)
+  Downloading sympy-1.14.0-py3-none-any.whl.metadata (12 kB)
+Collecting networkx>=2.5.1 (from torch==2.11.0+cu128)
+  Downloading networkx-3.6.1-py3-none-any.whl.metadata (6.8 kB)
+Collecting jinja2 (from torch==2.11.0+cu128)
+  Downloading https://download.pytorch.org/whl/jinja2-3.1.6-py3-none-any.whl.metadata (2.9 kB)
+Collecting fsspec>=0.8.5 (from torch==2.11.0+cu128)
+  Downloading fsspec-2026.7.0-py3-none-any.whl.metadata (10 kB)
+Collecting cuda-toolkit==12.8.1 (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/cuda-toolkit/cuda_toolkit-12.8.1-py2.py3-none-any.whl (2.3 kB)
+Collecting cuda-bindings<13,>=12.9.4 (from torch==2.11.0+cu128)
+  Downloading cuda_bindings-12.9.7-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (2.6 kB)
+Collecting nvidia-cudnn-cu12==9.19.0.56 (from torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-cudnn-cu12/nvidia_cudnn_cu12-9.19.0.56-py3-none-manylinux_2_27_x86_64.whl (657.9 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 657.9/657.9 MB 24.6 MB/s eta 0:00:00
+Collecting nvidia-cusparselt-cu12==0.7.1 (from torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-cusparselt-cu12/nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl (287.2 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 287.2/287.2 MB 25.5 MB/s eta 0:00:00
+Collecting nvidia-nccl-cu12==2.28.9 (from torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-nccl-cu12/nvidia_nccl_cu12-2.28.9-py3-none-manylinux_2_18_x86_64.whl (296.8 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 296.8/296.8 MB 22.5 MB/s eta 0:00:00
+Collecting nvidia-nvshmem-cu12==3.4.5 (from torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-nvshmem-cu12/nvidia_nvshmem_cu12-3.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (139.1 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 139.1/139.1 MB 23.7 MB/s eta 0:00:00
+Collecting triton==3.6.0 (from torch==2.11.0+cu128)
+  Downloading https://download-r2.pytorch.org/whl/triton-3.6.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (1.7 kB)
+Collecting numpy (from torchvision==0.26.0+cu128)
+  Downloading numpy-2.5.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (6.6 kB)
+Collecting pillow!=8.3.*,>=5.3.0 (from torchvision==0.26.0+cu128)
+  Downloading pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (9.1 kB)
+Collecting numpy (from torchvision==0.26.0+cu128)
+  Downloading numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (62 kB)
+Collecting opencv-python-headless<4.14.0,>=4.9.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading opencv_python_headless-4.13.0.92-cp37-abi3-manylinux_2_28_x86_64.whl.metadata (19 kB)
+Collecting einops<0.9.0,>=0.8.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading einops-0.8.2-py3-none-any.whl.metadata (13 kB)
+Collecting draccus==0.10.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading draccus-0.10.0-py3-none-any.whl.metadata (24 kB)
+Collecting huggingface-hub<2.0.0,>=1.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading huggingface_hub-1.26.0-py3-none-any.whl.metadata (16 kB)
+Collecting requests<3.0.0,>=2.32.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading requests-2.34.2-py3-none-any.whl.metadata (4.8 kB)
+Collecting gymnasium<2.0.0,>=1.1.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading gymnasium-1.3.0-py3-none-any.whl.metadata (10 kB)
+Collecting safetensors<1.0.0,>=0.4.3 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading safetensors-0.8.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.2 kB)
+Collecting packaging<26.0,>=24.2 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading packaging-25.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting termcolor<4.0.0,>=2.4.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading termcolor-3.3.0-py3-none-any.whl.metadata (6.5 kB)
+Collecting tqdm<5.0.0,>=4.66.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading tqdm-4.70.0-py3-none-any.whl.metadata (57 kB)
+Collecting cmake<4.2.0,>=3.29.0.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cmake-4.1.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (6.5 kB)
+Collecting setuptools<82 (from torch==2.11.0+cu128)
+  Downloading setuptools-80.10.2-py3-none-any.whl.metadata (6.6 kB)
+Collecting scipy<2.0.0,>=1.14.0 (from lerobot[all]==0.6.0)
+  Downloading scipy-1.18.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (62 kB)
+Collecting nvidia-cublas-cu12==12.8.4.1.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-cublas-cu12/nvidia_cublas_cu12-12.8.4.1-py3-none-manylinux_2_27_x86_64.whl (594.3 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 594.3/594.3 MB 24.8 MB/s eta 0:00:00
+Collecting nvidia-cuda-runtime-cu12==12.8.90.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-cuda-runtime-cu12/nvidia_cuda_runtime_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (954 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 954.8/954.8 kB 29.6 MB/s eta 0:00:00
+Collecting nvidia-cufft-cu12==11.3.3.83.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-cufft-cu12/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (193.1 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 193.1/193.1 MB 25.2 MB/s eta 0:00:00
+Collecting nvidia-cufile-cu12==1.13.1.3.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-cufile-cu12/nvidia_cufile_cu12-1.13.1.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (1.2 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 14.4 MB/s eta 0:00:00
+Collecting nvidia-cuda-cupti-cu12==12.8.90.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-cuda-cupti-cu12/nvidia_cuda_cupti_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (10.2 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.2/10.2 MB 23.6 MB/s eta 0:00:00
+Collecting nvidia-curand-cu12==10.3.9.90.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-curand-cu12/nvidia_curand_cu12-10.3.9.90-py3-none-manylinux_2_27_x86_64.whl (63.6 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 63.6/63.6 MB 21.8 MB/s eta 0:00:00
+Collecting nvidia-cusolver-cu12==11.7.3.90.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-cusolver-cu12/nvidia_cusolver_cu12-11.7.3.90-py3-none-manylinux_2_27_x86_64.whl (267.5 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 267.5/267.5 MB 25.4 MB/s eta 0:00:00
+Collecting nvidia-cusparse-cu12==12.5.8.93.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-cusparse-cu12/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (288.2 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 288.2/288.2 MB 23.6 MB/s eta 0:00:00
+Collecting nvidia-nvjitlink-cu12==12.8.93.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-nvjitlink-cu12/nvidia_nvjitlink_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl (39.3 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 39.3/39.3 MB 34.6 MB/s eta 0:00:00
+Collecting nvidia-cuda-nvrtc-cu12==12.8.93.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-cuda-nvrtc-cu12/nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl (88.0 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 88.0/88.0 MB 24.8 MB/s eta 0:00:00
+Collecting nvidia-nvtx-cu12==12.8.90.* (from cuda-toolkit[cublas,cudart,cufft,cufile,cupti,curand,cusolver,cusparse,nvjitlink,nvrtc,nvtx]==12.8.1; platform_system == "Linux"->torch==2.11.0+cu128)
+  Downloading https://pypi.nvidia.com/nvidia-nvtx-cu12/nvidia_nvtx_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (89 kB)
+Collecting mergedeep~=1.3 (from draccus==0.10.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading mergedeep-1.3.4-py3-none-any.whl.metadata (4.3 kB)
+Collecting pyyaml~=6.0 (from draccus==0.10.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.4 kB)
+Collecting pyyaml-include~=1.4 (from draccus==0.10.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pyyaml_include-1.4.1-py3-none-any.whl.metadata (1.3 kB)
+Collecting toml~=0.10 (from draccus==0.10.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading toml-0.10.2-py2.py3-none-any.whl.metadata (7.1 kB)
+Collecting typing-inspect~=0.9.0 (from draccus==0.10.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading https://download.pytorch.org/whl/typing_inspect-0.9.0-py3-none-any.whl (8.8 kB)
+Collecting cuda-pathfinder~=1.1 (from cuda-bindings<13,>=12.9.4->torch==2.11.0+cu128)
+  Downloading cuda_pathfinder-1.6.0-py3-none-any.whl.metadata (1.9 kB)
+Collecting cloudpickle>=1.2.0 (from gymnasium<2.0.0,>=1.1.1->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cloudpickle-3.1.2-py3-none-any.whl.metadata (7.1 kB)
+Collecting farama-notifications>=0.0.1 (from gymnasium<2.0.0,>=1.1.1->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading farama_notifications-0.0.6-py3-none-any.whl.metadata (729 bytes)
+Collecting click<9.0.0,>=8.4.2 (from huggingface-hub<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading click-8.4.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting hf-xet<2.0.0,>=1.5.1 (from huggingface-hub<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading hf_xet-1.6.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (4.9 kB)
+Collecting httpx<1,>=0.23.0 (from huggingface-hub<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading httpx-0.28.1-py3-none-any.whl.metadata (7.1 kB)
+Collecting charset_normalizer<4,>=2 (from requests<3.0.0,>=2.32.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading charset_normalizer-3.4.9-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (41 kB)
+Collecting idna<4,>=2.5 (from requests<3.0.0,>=2.32.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading idna-3.18-py3-none-any.whl.metadata (6.1 kB)
+Collecting urllib3<3,>=1.26 (from requests<3.0.0,>=2.32.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading urllib3-2.7.0-py3-none-any.whl.metadata (6.9 kB)
+Collecting certifi>=2023.5.7 (from requests<3.0.0,>=2.32.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading certifi-2026.7.22-py3-none-any.whl.metadata (2.5 kB)
+Collecting mpmath<1.4,>=1.1.0 (from sympy>=1.13.3->torch==2.11.0+cu128)
+  Downloading mpmath-1.3.0-py3-none-any.whl.metadata (8.6 kB)
+Collecting MarkupSafe>=2.0 (from jinja2->torch==2.11.0+cu128)
+  Downloading https://download.pytorch.org/whl/markupsafe-3.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.7 kB)
+Collecting gym-aloha<0.2.0,>=0.1.4 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading gym_aloha-0.1.4-py3-none-any.whl.metadata (7.2 kB)
+Collecting datasets<5.0.0,>=4.7.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading datasets-4.8.5-py3-none-any.whl.metadata (19 kB)
+Collecting pandas<3.0.0,>=2.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pandas-2.3.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (91 kB)
+Collecting pyarrow<30.0.0,>=21.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pyarrow-25.0.0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (3.0 kB)
+Collecting torchcodec<0.12.0,>=0.3.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading https://download.pytorch.org/whl/cu128/torchcodec-0.11.1%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (11 kB)
+Collecting jsonlines<5.0.0,>=4.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jsonlines-4.0.0-py3-none-any.whl.metadata (1.6 kB)
+Collecting pre-commit<5.0.0,>=3.7.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pre_commit-4.6.1-py2.py3-none-any.whl.metadata (1.2 kB)
+Collecting debugpy<1.9.0,>=1.8.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading debugpy-1.8.21-cp312-cp312-manylinux_2_34_x86_64.whl.metadata (1.4 kB)
+Collecting grpcio-tools<2.0.0,>=1.73.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading grpcio_tools-1.83.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.3 kB)
+Collecting mypy>=1.19.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading mypy-2.3.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.4 kB)
+Collecting ruff>=0.14.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading ruff-0.16.1-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (26 kB)
+Collecting dynamixel-sdk<3.9.0,>=3.7.31 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading dynamixel_sdk-3.8.4-py3-none-any.whl.metadata (617 bytes)
+Collecting feetech-servo-sdk<2.0.0,>=1.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading feetech-servo-sdk-1.0.0.tar.gz (8.4 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting hidapi<0.15.0,>=0.14.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading hidapi-0.14.0.post4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (3.6 kB)
+Collecting dm-tree<1.0.0,>=0.1.8 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading dm_tree-0.1.10-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (2.6 kB)
+Collecting decord<1.0.0,>=0.6.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading decord-0.6.0-py3-none-manylinux2010_x86_64.whl.metadata (422 bytes)
+Collecting gym-hil<0.2.0,>=0.1.14 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading gym_hil-0.1.14-py3-none-any.whl.metadata (7.5 kB)
+Collecting pyrealsense2<2.57.0,>=2.55.1.6486 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pyrealsense2-2.56.5.9235-cp312-cp312-manylinux1_x86_64.whl.metadata (1.9 kB)
+Collecting hf-libero<0.2.0,>=0.1.4 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading hf_libero-0.1.4-py3-none-any.whl.metadata (10 kB)
+Collecting metaworld==3.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading metaworld-3.0.0-py3-none-any.whl.metadata (9.7 kB)
+Collecting mujoco>=3.0.0 (from metaworld==3.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading mujoco-3.11.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (232 kB)
+Collecting imageio (from metaworld==3.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading imageio-2.37.4-py3-none-any.whl.metadata (9.6 kB)
+Collecting hebi-py<2.12.0,>=2.8.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading hebi_py-2.11.0.tar.gz (92.0 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 92.0/92.0 MB 7.0 MB/s eta 0:00:00
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting teleop<0.2.0,>=0.1.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading teleop-0.1.5-py3-none-any.whl.metadata (20 kB)
+Collecting fastapi<1.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading fastapi-0.141.1-py3-none-any.whl.metadata (27 kB)
+Collecting gym-pusht<0.2.0,>=0.1.5 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading gym_pusht-0.1.6-py3-none-any.whl.metadata (5.9 kB)
+Collecting pymunk<7.0.0,>=6.6.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pymunk-6.11.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (7.1 kB)
+Collecting reachy2_sdk<1.1.0,>=1.0.15 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading reachy2_sdk-1.0.15-py3-none-any.whl.metadata (4.5 kB)
+Collecting grpcio<=1.73.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading grpcio-1.73.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (3.8 kB)
+Collecting protobuf<=6.32.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading protobuf-6.32.0-cp39-abi3-manylinux2014_x86_64.whl.metadata (593 bytes)
+Collecting pydantic<3.0.0,>=2.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pydantic-2.13.4-py3-none-any.whl.metadata (109 kB)
+Collecting faker<35.0.0,>=33.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading Faker-34.0.2-py3-none-any.whl.metadata (15 kB)
+Collecting num2words<0.6.0,>=0.5.14 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading num2words-0.5.14-py3-none-any.whl.metadata (13 kB)
+Collecting pytest<9.0.0,>=8.1.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pytest-8.4.2-py3-none-any.whl.metadata (7.7 kB)
+Collecting pytest-timeout<3.0.0,>=2.4.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pytest_timeout-2.4.0-py3-none-any.whl.metadata (20 kB)
+Collecting pytest-cov<8.0.0,>=5.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pytest_cov-7.1.0-py3-none-any.whl.metadata (32 kB)
+Collecting mock-serial<0.1.0,>=0.0.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading mock_serial-0.0.1-py3-none-any.whl.metadata (4.7 kB)
+Collecting wandb<0.28.0,>=0.24.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading wandb-0.27.2-py3-none-manylinux_2_28_x86_64.whl.metadata (11 kB)
+Collecting scikit-image<0.26.0,>=0.23.2 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading scikit_image-0.25.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (14 kB)
+Collecting rerun-sdk<0.34.0,>=0.24.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading rerun_sdk-0.33.1-cp310-abi3-manylinux_2_28_x86_64.whl.metadata (6.2 kB)
+Collecting foxglove-sdk<0.26.0,>=0.25.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading foxglove_sdk-0.25.3-cp310-abi3-manylinux_2_28_x86_64.whl.metadata (2.9 kB)
+Collecting torchdiffeq<0.3.0,>=0.2.4 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading torchdiffeq-0.2.5-py3-none-any.whl.metadata (440 bytes)
+Collecting dill<0.4.2,>=0.3.0 (from datasets<5.0.0,>=4.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading dill-0.4.1-py3-none-any.whl.metadata (10 kB)
+Collecting xxhash (from datasets<5.0.0,>=4.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading xxhash-3.8.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (15 kB)
+Collecting multiprocess<0.70.20 (from datasets<5.0.0,>=4.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading multiprocess-0.70.19-py312-none-any.whl.metadata (7.5 kB)
+Collecting fsspec>=0.8.5 (from torch==2.11.0+cu128)
+  Downloading fsspec-2026.2.0-py3-none-any.whl.metadata (10 kB)
+Collecting absl-py>=0.6.1 (from dm-tree<1.0.0,>=0.1.8->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading absl_py-2.5.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting attrs>=18.2.0 (from dm-tree<1.0.0,>=0.1.8->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading attrs-26.1.0-py3-none-any.whl.metadata (8.8 kB)
+Collecting wrapt>=1.11.2 (from dm-tree<1.0.0,>=0.1.8->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading wrapt-2.3.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (7.4 kB)
+Collecting pyserial (from dynamixel-sdk<3.9.0,>=3.7.31->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pyserial-3.5-py2.py3-none-any.whl.metadata (1.6 kB)
+Collecting python-dateutil>=2.4 (from faker<35.0.0,>=33.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl.metadata (8.4 kB)
+Collecting starlette>=0.46.0 (from fastapi<1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading starlette-1.3.1-py3-none-any.whl.metadata (6.4 kB)
+Collecting typing-inspection>=0.4.2 (from fastapi<1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading typing_inspection-0.4.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting annotated-doc>=0.0.2 (from fastapi<1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading annotated_doc-0.0.5-py3-none-any.whl.metadata (6.5 kB)
+INFO: pip is looking at multiple versions of grpcio-tools to determine which version is compatible with other requirements. This could take a while.
+Collecting grpcio-tools<2.0.0,>=1.73.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading grpcio_tools-1.82.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.3 kB)
+  Downloading grpcio_tools-1.81.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.3 kB)
+  Downloading grpcio_tools-1.81.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.3 kB)
+  Downloading grpcio_tools-1.80.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.3 kB)
+  Downloading grpcio_tools-1.78.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.3 kB)
+  Downloading grpcio_tools-1.76.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.3 kB)
+  Downloading grpcio_tools-1.75.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.3 kB)
+INFO: pip is still looking at multiple versions of grpcio-tools to determine which version is compatible with other requirements. This could take a while.
+  Downloading grpcio_tools-1.75.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.3 kB)
+  Downloading grpcio_tools-1.74.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (5.3 kB)
+  Downloading grpcio_tools-1.73.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (5.3 kB)
+Collecting dm-control>=1.0.15 (from gym-aloha<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading dm_control-1.0.44-py3-none-any.whl.metadata (1.5 kB)
+Collecting mujoco>=3.0.0 (from metaworld==3.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading mujoco-3.8.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (42 kB)
+Collecting pygame>=2.5.1 (from gym-hil<0.2.0,>=0.1.14->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pygame-2.6.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (12 kB)
+Collecting pynput>=1.7.7 (from gym-hil<0.2.0,>=0.1.14->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pynput-1.8.2-py2.py3-none-any.whl.metadata (32 kB)
+Collecting opencv-python>=4.9.0 (from gym-pusht<0.2.0,>=0.1.5->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading opencv_python-5.0.0.93-cp37-abi3-manylinux_2_28_x86_64.whl.metadata (19 kB)
+Collecting shapely>=2.0.3 (from gym-pusht<0.2.0,>=0.1.5->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading shapely-2.1.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (6.8 kB)
+Collecting hf-egl-probe>=1.0.1 (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading hf_egl_probe-1.0.2.tar.gz (217 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting hydra-core<1.4,>=1.2 (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading hydra_core-1.3.4-py3-none-any.whl.metadata (5.7 kB)
+Collecting robomimic==0.2.0 (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading robomimic-0.2.0.tar.gz (192 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting robosuite==1.4.0 (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading robosuite-1.4.0-py3-none-any.whl.metadata (5.6 kB)
+Collecting bddl==1.0.1 (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading bddl-1.0.1.tar.gz (164 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting transformers (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading transformers-5.14.1-py3-none-any.whl.metadata (32 kB)
+Collecting easydict (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading easydict-1.13-py3-none-any.whl.metadata (4.2 kB)
+Collecting thop (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading thop-0.1.1.post2209072238-py3-none-any.whl.metadata (2.7 kB)
+Collecting matplotlib>=3.5.3 (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading matplotlib-3.11.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (80 kB)
+Collecting future>=0.18.2 (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading future-1.0.0-py3-none-any.whl.metadata (4.0 kB)
+Collecting jupytext (from bddl==1.0.1->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupytext-1.19.5-py3-none-any.whl.metadata (15 kB)
+Collecting h5py (from robomimic==0.2.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading h5py-3.16.0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (3.0 kB)
+Collecting psutil (from robomimic==0.2.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl.metadata (22 kB)
+Collecting tensorboard (from robomimic==0.2.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading tensorboard-2.21.0-py3-none-any.whl.metadata (1.8 kB)
+Collecting tensorboardX (from robomimic==0.2.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading tensorboardx-2.6.5-py3-none-any.whl.metadata (6.6 kB)
+Collecting imageio-ffmpeg (from robomimic==0.2.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading imageio_ffmpeg-0.6.0-py3-none-manylinux2014_x86_64.whl.metadata (1.5 kB)
+Collecting egl_probe>=1.0.1 (from robomimic==0.2.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading egl_probe-1.0.2.tar.gz (217 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting numba>=0.49.1 (from robosuite==1.4.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading numba-0.66.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (2.7 kB)
+Collecting anyio (from httpx<1,>=0.23.0->huggingface-hub<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading anyio-4.14.2-py3-none-any.whl.metadata (4.6 kB)
+Collecting httpcore==1.* (from httpx<1,>=0.23.0->huggingface-hub<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading httpcore-1.0.9-py3-none-any.whl.metadata (21 kB)
+Collecting h11>=0.16 (from httpcore==1.*->httpx<1,>=0.23.0->huggingface-hub<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading h11-0.16.0-py3-none-any.whl.metadata (8.3 kB)
+Collecting mypy_extensions>=1.0.0 (from mypy>=1.19.1->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading mypy_extensions-1.1.0-py3-none-any.whl.metadata (1.1 kB)
+Collecting pathspec>=1.0.0 (from mypy>=1.19.1->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pathspec-1.1.1-py3-none-any.whl.metadata (14 kB)
+Collecting librt>=0.13.0 (from mypy>=1.19.1->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading librt-0.13.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (1.3 kB)
+Collecting ast-serialize<1.0.0,>=0.6.0 (from mypy>=1.19.1->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading ast_serialize-0.6.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (1.3 kB)
+Collecting docopt>=0.6.2 (from num2words<0.6.0,>=0.5.14->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading docopt-0.6.2.tar.gz (25 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting pytz>=2020.1 (from pandas<3.0.0,>=2.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pytz-2026.3.post1-py2.py3-none-any.whl.metadata (22 kB)
+Collecting tzdata>=2022.7 (from pandas<3.0.0,>=2.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading tzdata-2026.3-py2.py3-none-any.whl.metadata (1.4 kB)
+Collecting cfgv>=2.0.0 (from pre-commit<5.0.0,>=3.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cfgv-3.5.0-py2.py3-none-any.whl.metadata (8.9 kB)
+Collecting identify>=1.0.0 (from pre-commit<5.0.0,>=3.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading identify-2.6.19-py2.py3-none-any.whl.metadata (4.4 kB)
+Collecting nodeenv>=0.11.1 (from pre-commit<5.0.0,>=3.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading nodeenv-1.10.0-py2.py3-none-any.whl.metadata (24 kB)
+Collecting virtualenv>=20.10.0 (from pre-commit<5.0.0,>=3.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading virtualenv-21.7.1-py3-none-any.whl.metadata (3.5 kB)
+Collecting annotated-types>=0.6.0 (from pydantic<3.0.0,>=2.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading annotated_types-0.8.0-py3-none-any.whl.metadata (15 kB)
+Collecting pydantic-core==2.46.4 (from pydantic<3.0.0,>=2.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (6.6 kB)
+Collecting cffi>=1.17.1 (from pymunk<7.0.0,>=6.6.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (2.5 kB)
+Collecting iniconfig>=1 (from pytest<9.0.0,>=8.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading iniconfig-2.3.0-py3-none-any.whl.metadata (2.5 kB)
+Collecting pluggy<2,>=1.5 (from pytest<9.0.0,>=8.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pluggy-1.6.0-py3-none-any.whl.metadata (4.8 kB)
+Collecting pygments>=2.7.2 (from pytest<9.0.0,>=8.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pygments-2.20.0-py3-none-any.whl.metadata (2.5 kB)
+Collecting coverage>=7.10.6 (from coverage[toml]>=7.10.6->pytest-cov<8.0.0,>=5.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading coverage-7.15.3-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (8.6 kB)
+Collecting pyquaternion==0.9.9 (from reachy2_sdk<1.1.0,>=1.0.15->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pyquaternion-0.9.9-py3-none-any.whl.metadata (1.4 kB)
+Collecting opencv-python>=4.9.0 (from gym-pusht<0.2.0,>=0.1.5->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading opencv_python-4.14.0.94-cp37-abi3-manylinux_2_28_x86_64.whl.metadata (19 kB)
+Collecting reachy2-sdk-api<1.1.0,>=1.0.21 (from reachy2_sdk<1.1.0,>=1.0.15->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading reachy2_sdk_api-1.0.21-py3-none-any.whl.metadata (539 bytes)
+Collecting tifffile>=2022.8.12 (from scikit-image<0.26.0,>=0.23.2->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading tifffile-2026.7.31-py3-none-any.whl.metadata (33 kB)
+Collecting lazy-loader>=0.4 (from scikit-image<0.26.0,>=0.23.2->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading lazy_loader-0.5-py3-none-any.whl.metadata (5.9 kB)
+Collecting uvicorn[standard] (from teleop<0.2.0,>=0.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading uvicorn-0.52.1-py3-none-any.whl.metadata (6.6 kB)
+Collecting transforms3d (from teleop<0.2.0,>=0.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading transforms3d-0.4.2-py3-none-any.whl.metadata (2.8 kB)
+Collecting websocket-client (from teleop<0.2.0,>=0.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading websocket_client-1.9.0-py3-none-any.whl.metadata (8.3 kB)
+Collecting gitpython!=3.1.29,>=1.0.0 (from wandb<0.28.0,>=0.24.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading gitpython-3.1.57-py3-none-any.whl.metadata (13 kB)
+Collecting platformdirs (from wandb<0.28.0,>=0.24.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading platformdirs-4.11.0-py3-none-any.whl.metadata (5.5 kB)
+Collecting sentry-sdk>=2.0.0 (from wandb<0.28.0,>=0.24.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading sentry_sdk-2.66.1-py3-none-any.whl.metadata (11 kB)
+Collecting accelerate<2.0.0,>=1.14.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading accelerate-1.14.0-py3-none-any.whl.metadata (19 kB)
+Collecting av<16.0.0,>=15.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading av-15.1.0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (4.6 kB)
+Collecting python-can<5.0.0,>=4.2.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading python_can-4.6.1-py3-none-any.whl.metadata (8.6 kB)
+Collecting deepdiff<9.0.0,>=7.0.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading deepdiff-8.6.2-py3-none-any.whl.metadata (8.8 kB)
+Collecting diffusers<0.36.0,>=0.27.2 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading diffusers-0.35.2-py3-none-any.whl.metadata (20 kB)
+Collecting contourpy<2.0.0,>=1.3.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading contourpy-1.3.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (5.5 kB)
+Collecting motorbridge<0.4.0,>=0.3.2 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading motorbridge-0.3.9-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (19 kB)
+Collecting motorbridge-smart-servo<0.1.0,>=0.0.4 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading motorbridge_smart_servo-0.0.4-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (6.3 kB)
+Collecting jupyter<2.0.0,>=1.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyter-1.1.1-py2.py3-none-any.whl.metadata (2.0 kB)
+Collecting ipykernel<7.0.0,>=6.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading ipykernel-6.31.0-py3-none-any.whl.metadata (4.5 kB)
+Collecting peft<1.0.0,>=0.18.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading peft-0.20.0-py3-none-any.whl.metadata (14 kB)
+Collecting placo<0.9.16,>=0.9.6 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading placo-0.9.15-0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (2.6 kB)
+Collecting cmeel-urdfdom<5,>=4 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cmeel_urdfdom-4.0.1-1-py3-none-manylinux_2_28_x86_64.whl.metadata (2.7 kB)
+Collecting cmeel-tinyxml2<11 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cmeel_tinyxml2-10.0.0-0-py3-none-manylinux_2_28_x86_64.whl.metadata (792 bytes)
+Collecting pyzmq<28.0.0,>=26.2.1 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pyzmq-27.1.0-cp312-abi3-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl.metadata (6.0 kB)
+Collecting qwen-vl-utils<0.1.0,>=0.0.11 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading qwen_vl_utils-0.0.14-py3-none-any.whl.metadata (9.0 kB)
+Collecting timm<1.1.0,>=1.0.0 (from lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading timm-1.0.28-py3-none-any.whl.metadata (40 kB)
+Collecting transformers (from hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading transformers-5.5.4-py3-none-any.whl.metadata (32 kB)
+Collecting pycparser (from cffi>=1.17.1->pymunk<7.0.0,>=6.6.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pycparser-3.0-py3-none-any.whl.metadata (8.2 kB)
+Collecting cmeel (from cmeel-tinyxml2<11->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cmeel-0.60.1-py3-none-any.whl.metadata (4.8 kB)
+Collecting cmeel-console-bridge (from cmeel-urdfdom<5,>=4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cmeel_console_bridge-1.0.2.3-0-py3-none-manylinux_2_28_x86_64.whl.metadata (1.0 kB)
+Collecting orderly-set<6,>=5.4.1 (from deepdiff<9.0.0,>=7.0.1->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading orderly_set-5.5.0-py3-none-any.whl.metadata (6.6 kB)
+Collecting importlib_metadata (from diffusers<0.36.0,>=0.27.2->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading importlib_metadata-9.0.0-py3-none-any.whl.metadata (4.5 kB)
+Collecting regex!=2019.12.17 (from diffusers<0.36.0,>=0.27.2->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading regex-2026.7.19-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (40 kB)
+Collecting dm-env (from dm-control>=1.0.15->gym-aloha<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading dm_env-1.6-py3-none-any.whl.metadata (966 bytes)
+Collecting glfw (from dm-control>=1.0.15->gym-aloha<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading glfw-2.10.2-py2.py3-none-manylinux_2_28_x86_64.whl.metadata (5.5 kB)
+Collecting labmaze (from dm-control>=1.0.15->gym-aloha<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading labmaze-1.0.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (274 bytes)
+Collecting lxml (from dm-control>=1.0.15->gym-aloha<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading lxml-6.1.1-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl.metadata (3.5 kB)
+INFO: pip is looking at multiple versions of dm-control to determine which version is compatible with other requirements. This could take a while.
+Collecting dm-control>=1.0.15 (from gym-aloha<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading dm_control-1.0.43-py3-none-any.whl.metadata (1.5 kB)
+  Downloading dm_control-1.0.41-py3-none-any.whl.metadata (1.5 kB)
+Collecting pyopengl>=3.1.4 (from dm-control>=1.0.15->gym-aloha<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pyopengl-3.1.10-py3-none-any.whl.metadata (3.3 kB)
+Collecting pyparsing>=3.0.0 (from dm-control>=1.0.15->gym-aloha<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pyparsing-3.3.2-py3-none-any.whl.metadata (5.8 kB)
+Collecting aiohttp!=4.0.0a0,!=4.0.0a1 (from fsspec[http]<=2026.2.0,>=2023.1.0->datasets<5.0.0,>=4.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading aiohttp-3.14.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (8.3 kB)
+Collecting gitdb<5,>=4.0.1 (from gitpython!=3.1.29,>=1.0.0->wandb<0.28.0,>=0.24.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading gitdb-4.0.12-py3-none-any.whl.metadata (1.2 kB)
+Collecting omegaconf<2.4,>=2.2 (from hydra-core<1.4,>=1.2->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading omegaconf-2.3.1-py3-none-any.whl.metadata (4.5 kB)
+Collecting antlr4-python3-runtime==4.9.* (from hydra-core<1.4,>=1.2->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading antlr4-python3-runtime-4.9.3.tar.gz (117 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting comm>=0.1.1 (from ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading comm-0.2.3-py3-none-any.whl.metadata (3.7 kB)
+Collecting ipython>=7.23.1 (from ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading ipython-9.16.1-py3-none-any.whl.metadata (4.6 kB)
+Collecting jupyter-client>=8.0.0 (from ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyter_client-8.9.1-py3-none-any.whl.metadata (8.5 kB)
+Collecting jupyter-core!=5.0.*,>=4.12 (from ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyter_core-5.9.1-py3-none-any.whl.metadata (1.5 kB)
+Collecting matplotlib-inline>=0.1 (from ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading matplotlib_inline-0.2.2-py3-none-any.whl.metadata (2.4 kB)
+Collecting nest-asyncio>=1.4 (from ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading nest_asyncio-1.6.0-py3-none-any.whl.metadata (2.8 kB)
+Collecting tornado>=6.2 (from ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading tornado-6.5.7-cp39-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (2.8 kB)
+Collecting traitlets>=5.4.0 (from ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading traitlets-5.16.1-py3-none-any.whl.metadata (10 kB)
+Collecting notebook (from jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading notebook-7.6.1-py3-none-any.whl.metadata (10 kB)
+Collecting jupyter-console (from jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyter_console-6.6.3-py3-none-any.whl.metadata (5.8 kB)
+Collecting nbconvert (from jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading nbconvert-7.17.1-py3-none-any.whl.metadata (8.4 kB)
+Collecting ipywidgets (from jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading ipywidgets-8.1.8-py3-none-any.whl.metadata (2.4 kB)
+Collecting jupyterlab (from jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyterlab-4.6.2-py3-none-any.whl.metadata (16 kB)
+Collecting cycler>=0.10 (from matplotlib>=3.5.3->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cycler-0.12.1-py3-none-any.whl.metadata (3.8 kB)
+Collecting fonttools>=4.28.2 (from matplotlib>=3.5.3->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading fonttools-4.63.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (118 kB)
+Collecting kiwisolver>=1.3.1 (from matplotlib>=3.5.3->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading kiwisolver-1.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.1 kB)
+Collecting etils[epath] (from mujoco>=3.0.0->metaworld==3.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading etils-1.14.0-py3-none-any.whl.metadata (6.5 kB)
+Collecting eiquadprog<2,>=1.2.6 (from placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading eiquadprog-1.3.2-0-py3-none-manylinux_2_28_x86_64.whl.metadata (2.7 kB)
+Collecting pin==3.4.0 (from placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pin-3.4.0-0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (24 kB)
+Collecting rhoban-cmeel-jsoncpp (from placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading rhoban_cmeel_jsoncpp-1.9.4.9-0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (4.3 kB)
+Collecting meshcat (from placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading meshcat-0.3.2-py3-none-any.whl.metadata (595 bytes)
+Collecting ischedule (from placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading ischedule-1.2.7-py3-none-any.whl.metadata (6.6 kB)
+Collecting cmeel-boost~=1.87.0 (from pin==3.4.0->placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cmeel_boost-1.87.0.1-0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (1.0 kB)
+Collecting coal-library<4,>=3 (from pin==3.4.0->placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading coal_library-3.0.1-0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (14 kB)
+Collecting six (from pynput>=1.7.7->gym-hil<0.2.0,>=0.1.14->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)
+Collecting evdev>=1.3 (from pynput>=1.7.7->gym-hil<0.2.0,>=0.1.14->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading evdev-1.9.3.tar.gz (32 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting python-xlib>=0.17 (from pynput>=1.7.7->gym-hil<0.2.0,>=0.1.14->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading python_xlib-0.33-py2.py3-none-any.whl.metadata (6.2 kB)
+Collecting wrapt>=1.11.2 (from dm-tree<1.0.0,>=0.1.8->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading wrapt-1.17.3-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (6.4 kB)
+Collecting tokenizers<=0.23.0,>=0.22.0 (from transformers->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading tokenizers-0.22.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (7.3 kB)
+Collecting typer (from transformers->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading typer-0.27.1-py3-none-any.whl.metadata (16 kB)
+Collecting distlib<1,>=0.3.7 (from virtualenv>=20.10.0->pre-commit<5.0.0,>=3.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading distlib-0.4.3-py2.py3-none-any.whl.metadata (5.3 kB)
+Collecting python-discovery>=1.4.2 (from virtualenv>=20.10.0->pre-commit<5.0.0,>=3.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading python_discovery-1.5.1-py3-none-any.whl.metadata (5.0 kB)
+Collecting httptools>=0.8.0 (from uvicorn[standard]->teleop<0.2.0,>=0.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading httptools-0.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (3.5 kB)
+Collecting python-dotenv>=0.13 (from uvicorn[standard]->teleop<0.2.0,>=0.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading python_dotenv-1.2.2-py3-none-any.whl.metadata (27 kB)
+Collecting uvloop>=0.15.1 (from uvicorn[standard]->teleop<0.2.0,>=0.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading uvloop-0.22.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (4.9 kB)
+Collecting watchfiles>=0.20 (from uvicorn[standard]->teleop<0.2.0,>=0.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading watchfiles-1.2.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.9 kB)
+Collecting websockets>=13.0 (from uvicorn[standard]->teleop<0.2.0,>=0.1.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading websockets-17.0.1-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (6.3 kB)
+Collecting aiohappyeyeballs>=2.5.0 (from aiohttp!=4.0.0a0,!=4.0.0a1->fsspec[http]<=2026.2.0,>=2023.1.0->datasets<5.0.0,>=4.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading aiohappyeyeballs-2.7.1-py3-none-any.whl.metadata (5.9 kB)
+Collecting aiosignal>=1.4.0 (from aiohttp!=4.0.0a0,!=4.0.0a1->fsspec[http]<=2026.2.0,>=2023.1.0->datasets<5.0.0,>=4.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading aiosignal-1.4.0-py3-none-any.whl.metadata (3.7 kB)
+Collecting frozenlist>=1.1.1 (from aiohttp!=4.0.0a0,!=4.0.0a1->fsspec[http]<=2026.2.0,>=2023.1.0->datasets<5.0.0,>=4.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading frozenlist-1.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (20 kB)
+Collecting multidict<7.0,>=4.5 (from aiohttp!=4.0.0a0,!=4.0.0a1->fsspec[http]<=2026.2.0,>=2023.1.0->datasets<5.0.0,>=4.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading multidict-6.7.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (5.3 kB)
+Collecting propcache>=0.2.0 (from aiohttp!=4.0.0a0,!=4.0.0a1->fsspec[http]<=2026.2.0,>=2023.1.0->datasets<5.0.0,>=4.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading propcache-0.5.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (16 kB)
+Collecting yarl<2.0,>=1.17.0 (from aiohttp!=4.0.0a0,!=4.0.0a1->fsspec[http]<=2026.2.0,>=2023.1.0->datasets<5.0.0,>=4.7.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading yarl-1.24.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (103 kB)
+INFO: pip is looking at multiple versions of eiquadprog to determine which version is compatible with other requirements. This could take a while.
+Collecting eiquadprog<2,>=1.2.6 (from placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading eiquadprog-1.3.0-0-py3-none-manylinux_2_28_x86_64.whl.metadata (2.7 kB)
+  Downloading eiquadprog-1.2.9-0-py3-none-manylinux_2_28_x86_64.whl.metadata (2.6 kB)
+Collecting smmap<6,>=3.0.1 (from gitdb<5,>=4.0.1->gitpython!=3.1.29,>=1.0.0->wandb<0.28.0,>=0.24.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading smmap-5.0.3-py3-none-any.whl.metadata (4.6 kB)
+Collecting ipython-pygments-lexers>=1.0.0 (from ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading ipython_pygments_lexers-1.1.1-py3-none-any.whl.metadata (1.1 kB)
+Collecting jedi>=0.18.2 (from ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jedi-0.20.0-py2.py3-none-any.whl.metadata (23 kB)
+Collecting pexpect>4.6 (from ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pexpect-4.9.0-py2.py3-none-any.whl.metadata (2.5 kB)
+Collecting prompt_toolkit<3.1.0,>=3.0.41 (from ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading prompt_toolkit-3.0.53-py3-none-any.whl.metadata (6.4 kB)
+Collecting stack_data>=0.6.0 (from ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading stack_data-0.6.3-py3-none-any.whl.metadata (18 kB)
+Collecting llvmlite<0.49,>=0.48.0dev0 (from numba>=0.49.1->robosuite==1.4.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading llvmlite-0.48.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.0 kB)
+Collecting zipp (from etils[epath]->mujoco>=3.0.0->metaworld==3.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading zipp-4.1.0-py3-none-any.whl.metadata (3.6 kB)
+Collecting widgetsnbextension~=4.0.14 (from ipywidgets->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading widgetsnbextension-4.0.15-py3-none-any.whl.metadata (1.6 kB)
+Collecting jupyterlab_widgets~=3.0.15 (from ipywidgets->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyterlab_widgets-3.0.16-py3-none-any.whl.metadata (20 kB)
+Collecting async-lru>=1.0.0 (from jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading async_lru-2.3.0-py3-none-any.whl.metadata (7.6 kB)
+Collecting jupyter-builder>=1.0.2 (from jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyter_builder-1.2.1-py3-none-any.whl.metadata (7.7 kB)
+Collecting jupyter-lsp>=2.0.0 (from jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyter_lsp-2.3.1-py3-none-any.whl.metadata (1.8 kB)
+Collecting jupyter-server<3,>=2.19.0 (from jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyter_server-2.20.0-py3-none-any.whl.metadata (8.5 kB)
+Collecting jupyterlab-server<3,>=2.28.0 (from jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyterlab_server-2.28.0-py3-none-any.whl.metadata (5.9 kB)
+Collecting notebook-shim>=0.2 (from jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading notebook_shim-0.2.4-py3-none-any.whl.metadata (4.0 kB)
+Collecting markdown-it-py>=1.0 (from jupytext->bddl==1.0.1->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading markdown_it_py-4.2.0-py3-none-any.whl.metadata (7.4 kB)
+Collecting mdit-py-plugins (from jupytext->bddl==1.0.1->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading mdit_py_plugins-0.6.1-py3-none-any.whl.metadata (2.9 kB)
+Collecting nbformat (from jupytext->bddl==1.0.1->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading nbformat-5.10.4-py3-none-any.whl.metadata (3.6 kB)
+Collecting u-msgpack-python>=2.4.1 (from meshcat->placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading u_msgpack_python-2.8.0-py2.py3-none-any.whl.metadata (1.3 kB)
+Collecting pyngrok>=4.1.6 (from meshcat->placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pyngrok-8.1.2-py3-none-any.whl.metadata (8.6 kB)
+Collecting beautifulsoup4 (from nbconvert->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading beautifulsoup4-4.15.0-py3-none-any.whl.metadata (3.8 kB)
+Collecting bleach!=5.0.0 (from bleach[css]!=5.0.0->nbconvert->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading bleach-6.4.0-py3-none-any.whl.metadata (32 kB)
+Collecting defusedxml (from nbconvert->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading defusedxml-0.7.1-py2.py3-none-any.whl.metadata (32 kB)
+Collecting jupyterlab-pygments (from nbconvert->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyterlab_pygments-0.3.0-py3-none-any.whl.metadata (4.4 kB)
+Collecting mistune<4,>=2.0.3 (from nbconvert->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading mistune-3.3.4-py3-none-any.whl.metadata (1.9 kB)
+Collecting nbclient>=0.5.0 (from nbconvert->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading nbclient-0.11.0-py3-none-any.whl.metadata (7.3 kB)
+Collecting pandocfilters>=1.4.1 (from nbconvert->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pandocfilters-1.5.1-py2.py3-none-any.whl.metadata (9.0 kB)
+INFO: pip is looking at multiple versions of tensorboard to determine which version is compatible with other requirements. This could take a while.
+Collecting tensorboard (from robomimic==0.2.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading tensorboard-2.20.0-py3-none-any.whl.metadata (1.8 kB)
+Collecting markdown>=2.6.8 (from tensorboard->robomimic==0.2.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading markdown-3.10.3-py3-none-any.whl.metadata (5.1 kB)
+Collecting tensorboard-data-server<0.8.0,>=0.7.0 (from tensorboard->robomimic==0.2.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading tensorboard_data_server-0.7.2-py3-none-manylinux_2_31_x86_64.whl.metadata (1.1 kB)
+Collecting werkzeug>=1.0.1 (from tensorboard->robomimic==0.2.0->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading werkzeug-3.1.8-py3-none-any.whl.metadata (4.0 kB)
+Collecting shellingham>=1.3.0 (from typer->transformers->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading shellingham-1.5.4-py2.py3-none-any.whl.metadata (3.5 kB)
+Collecting rich>=13.8.0 (from typer->transformers->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading rich-15.0.0-py3-none-any.whl.metadata (18 kB)
+Collecting webencodings (from bleach!=5.0.0->bleach[css]!=5.0.0->nbconvert->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading webencodings-0.5.1-py2.py3-none-any.whl.metadata (2.1 kB)
+Collecting tinycss2>=1.1.0 (from bleach[css]!=5.0.0->nbconvert->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading tinycss2-1.5.1-py3-none-any.whl.metadata (3.0 kB)
+Collecting cmeel-assimp<6,>=5.3.1 (from coal-library<4,>=3->pin==3.4.0->placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cmeel_assimp-5.4.3.1-0-py3-none-manylinux_2_28_x86_64.whl.metadata (968 bytes)
+Collecting cmeel-octomap<2,>=1.9.8.2 (from coal-library<4,>=3->pin==3.4.0->placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cmeel_octomap-1.10.0-5-py3-none-manylinux_2_28_x86_64.whl.metadata (983 bytes)
+Collecting cmeel-qhull<8.0.3,>=8.0.2.1 (from coal-library<4,>=3->pin==3.4.0->placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cmeel_qhull-8.0.2.1-1-py3-none-manylinux_2_28_x86_64.whl.metadata (838 bytes)
+Collecting eigenpy<4,>=3.10 (from coal-library<4,>=3->pin==3.4.0->placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading eigenpy-3.13.0-0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (5.5 kB)
+Collecting parso<0.9.0,>=0.8.6 (from jedi>=0.18.2->ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading parso-0.8.7-py2.py3-none-any.whl.metadata (8.2 kB)
+Collecting argon2-cffi>=21.1 (from jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading argon2_cffi-25.1.0-py3-none-any.whl.metadata (4.1 kB)
+Collecting jupyter-events>=0.11.0 (from jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyter_events-0.12.1-py3-none-any.whl.metadata (5.8 kB)
+Collecting jupyter-server-terminals>=0.4.4 (from jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jupyter_server_terminals-0.5.4-py3-none-any.whl.metadata (5.9 kB)
+Collecting prometheus-client>=0.9 (from jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading prometheus_client-0.26.0-py3-none-any.whl.metadata (2.1 kB)
+Collecting send2trash>=1.8.2 (from jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading send2trash-2.1.0-py3-none-any.whl.metadata (4.1 kB)
+Collecting terminado>=0.8.3 (from jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading terminado-0.18.1-py3-none-any.whl.metadata (5.8 kB)
+Collecting babel>=2.10 (from jupyterlab-server<3,>=2.28.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading babel-2.18.0-py3-none-any.whl.metadata (2.2 kB)
+Collecting json5>=0.9.0 (from jupyterlab-server<3,>=2.28.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading json5-0.15.0-py3-none-any.whl.metadata (37 kB)
+Collecting jsonschema>=4.18.0 (from jupyterlab-server<3,>=2.28.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jsonschema-4.26.0-py3-none-any.whl.metadata (7.6 kB)
+Collecting mdurl~=0.1 (from markdown-it-py>=1.0->jupytext->bddl==1.0.1->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading mdurl-0.1.2-py3-none-any.whl.metadata (1.6 kB)
+Collecting fastjsonschema>=2.15 (from nbformat->jupytext->bddl==1.0.1->hf-libero<0.2.0,>=0.1.4->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading fastjsonschema-2.22.1-py3-none-any.whl.metadata (2.1 kB)
+Collecting ptyprocess>=0.5 (from pexpect>4.6->ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading ptyprocess-0.7.0-py2.py3-none-any.whl.metadata (1.3 kB)
+Collecting wcwidth>=0.1.4 (from prompt_toolkit<3.1.0,>=3.0.41->ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading wcwidth-0.8.2-py3-none-any.whl.metadata (43 kB)
+Collecting executing>=1.2.0 (from stack_data>=0.6.0->ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading executing-2.2.1-py2.py3-none-any.whl.metadata (8.9 kB)
+Collecting asttokens>=2.1.0 (from stack_data>=0.6.0->ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading asttokens-3.0.2-py3-none-any.whl.metadata (5.7 kB)
+Collecting pure-eval (from stack_data>=0.6.0->ipython>=7.23.1->ipykernel<7.0.0,>=6.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading pure_eval-0.2.3-py3-none-any.whl.metadata (6.3 kB)
+Collecting soupsieve>=1.6.1 (from beautifulsoup4->nbconvert->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading soupsieve-2.9.1-py3-none-any.whl.metadata (4.6 kB)
+Collecting argon2-cffi-bindings (from argon2-cffi>=21.1->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading argon2_cffi_bindings-25.1.0-cp39-abi3-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl.metadata (7.4 kB)
+Collecting cmeel-zlib (from cmeel-assimp<6,>=5.3.1->coal-library<4,>=3->pin==3.4.0->placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading cmeel_zlib-1.3.2-0-py3-none-manylinux_2_28_x86_64.whl.metadata (707 bytes)
+INFO: pip is looking at multiple versions of eigenpy to determine which version is compatible with other requirements. This could take a while.
+Collecting eigenpy<4,>=3.10 (from coal-library<4,>=3->pin==3.4.0->placo<0.9.16,>=0.9.6->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading eigenpy-3.12.0-1-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (5.5 kB)
+  Downloading eigenpy-3.10.3-0-cp312-cp312-manylinux_2_28_x86_64.whl.metadata (5.3 kB)
+Collecting jsonschema-specifications>=2023.03.6 (from jsonschema>=4.18.0->jupyterlab-server<3,>=2.28.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl.metadata (2.9 kB)
+Collecting referencing>=0.28.4 (from jsonschema>=4.18.0->jupyterlab-server<3,>=2.28.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading referencing-0.37.0-py3-none-any.whl.metadata (2.8 kB)
+Collecting rpds-py>=0.25.0 (from jsonschema>=4.18.0->jupyterlab-server<3,>=2.28.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading rpds_py-2026.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.1 kB)
+Collecting python-json-logger>=2.0.4 (from jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading python_json_logger-4.1.0-py3-none-any.whl.metadata (3.7 kB)
+Collecting rfc3339-validator (from jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading rfc3339_validator-0.1.4-py2.py3-none-any.whl.metadata (1.5 kB)
+Collecting rfc3986-validator>=0.1.1 (from jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading rfc3986_validator-0.1.1-py2.py3-none-any.whl.metadata (1.7 kB)
+Collecting fqdn (from jsonschema[format-nongpl]>=4.18.0->jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading fqdn-1.5.1-py3-none-any.whl.metadata (1.4 kB)
+Collecting isoduration (from jsonschema[format-nongpl]>=4.18.0->jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading isoduration-20.11.0-py3-none-any.whl.metadata (5.7 kB)
+Collecting jsonpointer>1.13 (from jsonschema[format-nongpl]>=4.18.0->jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading jsonpointer-3.1.1-py3-none-any.whl.metadata (2.4 kB)
+Collecting rfc3987-syntax>=1.1.0 (from jsonschema[format-nongpl]>=4.18.0->jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading rfc3987_syntax-1.1.0-py3-none-any.whl.metadata (7.7 kB)
+Collecting uri-template (from jsonschema[format-nongpl]>=4.18.0->jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading uri_template-1.3.0-py3-none-any.whl.metadata (8.8 kB)
+Collecting webcolors>=24.6.0 (from jsonschema[format-nongpl]>=4.18.0->jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading webcolors-25.10.0-py3-none-any.whl.metadata (2.2 kB)
+Collecting lark>=1.2.2 (from rfc3987-syntax>=1.1.0->jsonschema[format-nongpl]>=4.18.0->jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading lark-1.3.1-py3-none-any.whl.metadata (1.8 kB)
+Collecting arrow>=0.15.0 (from isoduration->jsonschema[format-nongpl]>=4.18.0->jupyter-events>=0.11.0->jupyter-server<3,>=2.19.0->jupyterlab->jupyter<2.0.0,>=1.0.0->lerobot==0.6.0->lerobot[all]==0.6.0)
+  Downloading arrow-1.4.0-py3-none-any.whl.metadata (7.7 kB)
+Downloading https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl (820.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 820.3/820.3 MB 24.5 MB/s eta 0:00:00
+Downloading https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl (8.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 8.1/8.1 MB 17.1 MB/s eta 0:00:00
+Downloading lerobot-0.6.0-py3-none-any.whl (1.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 12.9 MB/s eta 0:00:00
+Downloading draccus-0.10.0-py3-none-any.whl (71 kB)
+Downloading https://download-r2.pytorch.org/whl/triton-3.6.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (188.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 188.3/188.3 MB 23.5 MB/s eta 0:00:00
+Downloading cmake-4.1.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (29.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 29.7/29.7 MB 25.9 MB/s eta 0:00:00
+Downloading cuda_bindings-12.9.7-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (7.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.6/7.6 MB 20.0 MB/s eta 0:00:00
+Downloading einops-0.8.2-py3-none-any.whl (65 kB)
+Downloading gymnasium-1.3.0-py3-none-any.whl (953 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 953.9/953.9 kB 24.7 MB/s eta 0:00:00
+Downloading huggingface_hub-1.26.0-py3-none-any.whl (780 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 780.4/780.4 kB 22.2 MB/s eta 0:00:00
+Downloading filelock-3.32.2-py3-none-any.whl (98 kB)
+Downloading networkx-3.6.1-py3-none-any.whl (2.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 24.1 MB/s eta 0:00:00
+Downloading numpy-2.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (16.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 16.5/16.5 MB 24.4 MB/s eta 0:00:00
+Downloading opencv_python_headless-4.13.0.92-cp37-abi3-manylinux_2_28_x86_64.whl (60.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 60.4/60.4 MB 22.0 MB/s eta 0:00:00
+Downloading packaging-25.0-py3-none-any.whl (66 kB)
+Downloading pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (6.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.9/6.9 MB 26.3 MB/s eta 0:00:00
+Downloading requests-2.34.2-py3-none-any.whl (73 kB)
+Downloading safetensors-0.8.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (516 kB)
+Downloading scipy-1.18.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (35.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 35.3/35.3 MB 21.9 MB/s eta 0:00:00
+Downloading setuptools-80.10.2-py3-none-any.whl (1.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.1/1.1 MB 30.5 MB/s eta 0:00:00
+Downloading sympy-1.14.0-py3-none-any.whl (6.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.3/6.3 MB 29.4 MB/s eta 0:00:00
+Downloading termcolor-3.3.0-py3-none-any.whl (7.7 kB)
+Downloading tqdm-4.70.0-py3-none-any.whl (80 kB)
+Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+Downloading https://download.pytorch.org/whl/jinja2-3.1.6-py3-none-any.whl (134 kB)
+Downloading metaworld-3.0.0-py3-none-any.whl (36.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 36.7/36.7 MB 12.4 MB/s eta 0:00:00
+Downloading certifi-2026.7.22-py3-none-any.whl (136 kB)
+Downloading charset_normalizer-3.4.9-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (224 kB)
+Downloading click-8.4.2-py3-none-any.whl (119 kB)
+Downloading cloudpickle-3.1.2-py3-none-any.whl (22 kB)
+Downloading cuda_pathfinder-1.6.0-py3-none-any.whl (54 kB)
+Downloading datasets-4.8.5-py3-none-any.whl (528 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 529.0/529.0 kB 39.2 MB/s eta 0:00:00
+Downloading fsspec-2026.2.0-py3-none-any.whl (202 kB)
+Downloading debugpy-1.8.21-cp312-cp312-manylinux_2_34_x86_64.whl (4.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.0/4.0 MB 30.4 MB/s eta 0:00:00
+Downloading decord-0.6.0-py3-none-manylinux2010_x86_64.whl (13.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 13.6/13.6 MB 29.6 MB/s eta 0:00:00
+Downloading dm_tree-0.1.10-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (186 kB)
+Downloading dynamixel_sdk-3.8.4-py3-none-any.whl (24 kB)
+Downloading Faker-34.0.2-py3-none-any.whl (1.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.9/1.9 MB 17.1 MB/s eta 0:00:00
+Downloading farama_notifications-0.0.6-py3-none-any.whl (2.9 kB)
+Downloading fastapi-0.141.1-py3-none-any.whl (131 kB)
+Downloading foxglove_sdk-0.25.3-cp310-abi3-manylinux_2_28_x86_64.whl (19.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 19.2/19.2 MB 8.7 MB/s eta 0:00:00
+Downloading grpcio-1.73.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (6.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.0/6.0 MB 29.0 MB/s eta 0:00:00
+Downloading grpcio_tools-1.73.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.7/2.7 MB 25.1 MB/s eta 0:00:00
+Downloading gym_aloha-0.1.4-py3-none-any.whl (447 kB)
+Downloading gym_hil-0.1.14-py3-none-any.whl (5.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.8/5.8 MB 10.7 MB/s eta 0:00:00
+Downloading gym_pusht-0.1.6-py3-none-any.whl (16 kB)
+Downloading hf_libero-0.1.4-py3-none-any.whl (3.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.2/3.2 MB 17.6 MB/s eta 0:00:00
+Downloading robosuite-1.4.0-py3-none-any.whl (193.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 193.5/193.5 MB 28.7 MB/s eta 0:00:00
+Downloading hf_xet-1.6.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (4.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.5/4.5 MB 32.2 MB/s eta 0:00:00
+Downloading hidapi-0.14.0.post4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (1.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.1/1.1 MB 35.2 MB/s eta 0:00:00
+Downloading httpx-0.28.1-py3-none-any.whl (73 kB)
+Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)
+Downloading idna-3.18-py3-none-any.whl (65 kB)
+Downloading jsonlines-4.0.0-py3-none-any.whl (8.7 kB)
+Downloading https://download.pytorch.org/whl/markupsafe-3.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (22 kB)
+Downloading mergedeep-1.3.4-py3-none-any.whl (6.4 kB)
+Downloading mock_serial-0.0.1-py3-none-any.whl (6.1 kB)
+Downloading mpmath-1.3.0-py3-none-any.whl (536 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 536.2/536.2 kB 37.7 MB/s eta 0:00:00
+Downloading mypy-2.3.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (15.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 15.3/15.3 MB 27.5 MB/s eta 0:00:00
+Downloading num2words-0.5.14-py3-none-any.whl (163 kB)
+Downloading pandas-2.3.3-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (12.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 12.4/12.4 MB 34.1 MB/s eta 0:00:00
+Downloading pre_commit-4.6.1-py2.py3-none-any.whl (226 kB)
+Downloading protobuf-6.32.0-cp39-abi3-manylinux2014_x86_64.whl (322 kB)
+Downloading pyarrow-25.0.0-cp312-cp312-manylinux_2_28_x86_64.whl (50.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 50.1/50.1 MB 32.7 MB/s eta 0:00:00
+Downloading pydantic-2.13.4-py3-none-any.whl (472 kB)
+Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 20.8 MB/s eta 0:00:00
+Downloading pymunk-6.11.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (1.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.1/1.1 MB 36.1 MB/s eta 0:00:00
+Downloading pyrealsense2-2.56.5.9235-cp312-cp312-manylinux1_x86_64.whl (11.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 11.1/11.1 MB 28.5 MB/s eta 0:00:00
+Downloading pytest-8.4.2-py3-none-any.whl (365 kB)
+Downloading pytest_cov-7.1.0-py3-none-any.whl (22 kB)
+Downloading pytest_timeout-2.4.0-py3-none-any.whl (14 kB)
+Downloading pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (807 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 807.9/807.9 kB 31.5 MB/s eta 0:00:00
+Downloading pyyaml_include-1.4.1-py3-none-any.whl (19 kB)
+Downloading reachy2_sdk-1.0.15-py3-none-any.whl (95 kB)
+Downloading pyquaternion-0.9.9-py3-none-any.whl (14 kB)
+Downloading rerun_sdk-0.33.1-cp310-abi3-manylinux_2_28_x86_64.whl (139.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 139.6/139.6 MB 9.3 MB/s eta 0:00:00
+Downloading ruff-0.16.1-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (11.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 11.5/11.5 MB 21.9 MB/s eta 0:00:00
+Downloading scikit_image-0.25.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (15.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 15.0/15.0 MB 28.1 MB/s eta 0:00:00
+Downloading teleop-0.1.5-py3-none-any.whl (42 kB)
+Downloading toml-0.10.2-py2.py3-none-any.whl (16 kB)
+Downloading https://download.pytorch.org/whl/cu128/torchcodec-0.11.1%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl (2.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.5/2.5 MB 9.8 MB/s eta 0:00:00
+Downloading torchdiffeq-0.2.5-py3-none-any.whl (32 kB)
+Downloading urllib3-2.7.0-py3-none-any.whl (131 kB)
+Downloading wandb-0.27.2-py3-none-manylinux_2_28_x86_64.whl (26.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 26.4/26.4 MB 23.6 MB/s eta 0:00:00
+Downloading absl_py-2.5.0-py3-none-any.whl (137 kB)
+Downloading accelerate-1.14.0-py3-none-any.whl (389 kB)
+Downloading annotated_doc-0.0.5-py3-none-any.whl (5.3 kB)
+Downloading annotated_types-0.8.0-py3-none-any.whl (13 kB)
+Downloading ast_serialize-0.6.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (1.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 32.4 MB/s eta 0:00:00
+Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
+Downloading av-15.1.0-cp312-cp312-manylinux_2_28_x86_64.whl (39.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 39.9/39.9 MB 26.5 MB/s eta 0:00:00
+Downloading cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (221 kB)
+Downloading cfgv-3.5.0-py2.py3-none-any.whl (7.4 kB)
+Downloading cmeel_tinyxml2-10.0.0-0-py3-none-manylinux_2_28_x86_64.whl (147 kB)
+Downloading cmeel_urdfdom-4.0.1-1-py3-none-manylinux_2_28_x86_64.whl (399 kB)
+Downloading contourpy-1.3.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (362 kB)
+Downloading coverage-7.15.3-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (257 kB)
+Downloading deepdiff-8.6.2-py3-none-any.whl (91 kB)
+Downloading diffusers-0.35.2-py3-none-any.whl (4.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.1/4.1 MB 25.2 MB/s eta 0:00:00
+Downloading dill-0.4.1-py3-none-any.whl (120 kB)
+Downloading dm_control-1.0.41-py3-none-any.whl (56.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 56.4/56.4 MB 9.4 MB/s eta 0:00:00
+Downloading future-1.0.0-py3-none-any.whl (491 kB)
+Downloading gitpython-3.1.57-py3-none-any.whl (217 kB)
+Downloading hydra_core-1.3.4-py3-none-any.whl (155 kB)
+Downloading identify-2.6.19-py2.py3-none-any.whl (99 kB)
+Downloading imageio-2.37.4-py3-none-any.whl (318 kB)
+Downloading iniconfig-2.3.0-py3-none-any.whl (7.5 kB)
+Downloading ipykernel-6.31.0-py3-none-any.whl (117 kB)
+Downloading jupyter-1.1.1-py2.py3-none-any.whl (2.7 kB)
+Downloading lazy_loader-0.5-py3-none-any.whl (8.0 kB)
+Downloading librt-0.13.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (531 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 531.8/531.8 kB 28.2 MB/s eta 0:00:00
+Downloading matplotlib-3.11.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (10.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.0/10.0 MB 23.5 MB/s eta 0:00:00
+Downloading motorbridge-0.3.9-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (1.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 11.6 MB/s eta 0:00:00
+Downloading motorbridge_smart_servo-0.0.4-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (348 kB)
+Downloading mujoco-3.8.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (7.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.3/7.3 MB 20.5 MB/s eta 0:00:00
+Downloading multiprocess-0.70.19-py312-none-any.whl (150 kB)
+Downloading mypy_extensions-1.1.0-py3-none-any.whl (5.0 kB)
+Downloading nodeenv-1.10.0-py2.py3-none-any.whl (23 kB)
+Downloading opencv_python-4.14.0.94-cp37-abi3-manylinux_2_28_x86_64.whl (77.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 77.4/77.4 MB 24.9 MB/s eta 0:00:00
+Downloading pathspec-1.1.1-py3-none-any.whl (57 kB)
+Downloading peft-0.20.0-py3-none-any.whl (775 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 775.8/775.8 kB 15.9 MB/s eta 0:00:00
+Downloading placo-0.9.15-0-cp312-cp312-manylinux_2_28_x86_64.whl (2.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.2/2.2 MB 10.0 MB/s eta 0:00:00
+Downloading pin-3.4.0-0-cp312-cp312-manylinux_2_28_x86_64.whl (17.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 17.7/17.7 MB 10.4 MB/s eta 0:00:00
+Downloading pluggy-1.6.0-py3-none-any.whl (20 kB)
+Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl (155 kB)
+Downloading pygame-2.6.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (14.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.0/14.0 MB 28.3 MB/s eta 0:00:00
+Downloading pygments-2.20.0-py3-none-any.whl (1.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 37.2 MB/s eta 0:00:00
+Downloading pynput-1.8.2-py2.py3-none-any.whl (92 kB)
+Downloading pyserial-3.5-py2.py3-none-any.whl (90 kB)
+Downloading python_can-4.6.1-py3-none-any.whl (276 kB)
+Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
+Downloading pytz-2026.3.post1-py2.py3-none-any.whl (508 kB)
+Downloading pyzmq-27.1.0-cp312-abi3-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl (840 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 841.0/841.0 kB 37.6 MB/s eta 0:00:00
+Downloading qwen_vl_utils-0.0.14-py3-none-any.whl (8.1 kB)
+Downloading reachy2_sdk_api-1.0.21-py3-none-any.whl (118 kB)
+Downloading sentry_sdk-2.66.1-py3-none-any.whl (505 kB)
+Downloading shapely-2.1.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (3.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.1/3.1 MB 13.6 MB/s eta 0:00:00
+Downloading starlette-1.3.1-py3-none-any.whl (73 kB)
+Downloading anyio-4.14.2-py3-none-any.whl (125 kB)
+Downloading tifffile-2026.7.31-py3-none-any.whl (271 kB)
+Downloading timm-1.0.28-py3-none-any.whl (2.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.6/2.6 MB 30.7 MB/s eta 0:00:00
+Downloading transformers-5.5.4-py3-none-any.whl (10.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.2/10.2 MB 27.7 MB/s eta 0:00:00
+Downloading typing_inspection-0.4.2-py3-none-any.whl (14 kB)
+Downloading tzdata-2026.3-py2.py3-none-any.whl (348 kB)
+Downloading virtualenv-21.7.1-py3-none-any.whl (5.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.5/5.5 MB 35.5 MB/s eta 0:00:00
+Downloading platformdirs-4.11.0-py3-none-any.whl (23 kB)
+Downloading wrapt-1.17.3-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (88 kB)
+Downloading easydict-1.13-py3-none-any.whl (6.8 kB)
+Downloading thop-0.1.1.post2209072238-py3-none-any.whl (15 kB)
+Downloading transforms3d-0.4.2-py3-none-any.whl (1.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 32.6 MB/s eta 0:00:00
+Downloading websocket_client-1.9.0-py3-none-any.whl (82 kB)
+Downloading xxhash-3.8.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (220 kB)
+Downloading aiohttp-3.14.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (1.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.8/1.8 MB 35.9 MB/s eta 0:00:00
+Downloading comm-0.2.3-py3-none-any.whl (7.3 kB)
+Downloading cycler-0.12.1-py3-none-any.whl (8.3 kB)
+Downloading distlib-0.4.3-py2.py3-none-any.whl (470 kB)
+Downloading eiquadprog-1.2.9-0-py3-none-manylinux_2_28_x86_64.whl (112 kB)
+Downloading fonttools-4.63.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (5.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.0/5.0 MB 26.7 MB/s eta 0:00:00
+Downloading gitdb-4.0.12-py3-none-any.whl (62 kB)
+Downloading h11-0.16.0-py3-none-any.whl (37 kB)
+Downloading httptools-0.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (523 kB)
+Downloading ipython-9.16.1-py3-none-any.whl (625 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 626.0/626.0 kB 48.1 MB/s eta 0:00:00
+Downloading jupyter_client-8.9.1-py3-none-any.whl (109 kB)
+Downloading jupyter_core-5.9.1-py3-none-any.whl (29 kB)
+Downloading kiwisolver-1.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (1.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.5/1.5 MB 26.5 MB/s eta 0:00:00
+Downloading matplotlib_inline-0.2.2-py3-none-any.whl (9.5 kB)
+Downloading nest_asyncio-1.6.0-py3-none-any.whl (5.2 kB)
+Downloading numba-0.66.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (3.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.9/3.9 MB 23.7 MB/s eta 0:00:00
+Downloading omegaconf-2.3.1-py3-none-any.whl (79 kB)
+Downloading orderly_set-5.5.0-py3-none-any.whl (13 kB)
+Downloading pyopengl-3.1.10-py3-none-any.whl (3.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.2/3.2 MB 27.7 MB/s eta 0:00:00
+Downloading pyparsing-3.3.2-py3-none-any.whl (122 kB)
+Downloading python_discovery-1.5.1-py3-none-any.whl (35 kB)
+Downloading python_dotenv-1.2.2-py3-none-any.whl (22 kB)
+Downloading python_xlib-0.33-py2.py3-none-any.whl (182 kB)
+Downloading regex-2026.7.19-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (801 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 801.8/801.8 kB 32.8 MB/s eta 0:00:00
+Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+Downloading tokenizers-0.22.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.3/3.3 MB 28.5 MB/s eta 0:00:00
+Downloading tornado-6.5.7-cp39-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (449 kB)
+Downloading traitlets-5.16.1-py3-none-any.whl (86 kB)
+Downloading uvloop-0.22.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (4.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.4/4.4 MB 30.7 MB/s eta 0:00:00
+Downloading watchfiles-1.2.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (456 kB)
+Downloading websockets-17.0.1-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (220 kB)
+Downloading cmeel-0.60.1-py3-none-any.whl (20 kB)
+Downloading cmeel_console_bridge-1.0.2.3-0-py3-none-manylinux_2_28_x86_64.whl (24 kB)
+Downloading dm_env-1.6-py3-none-any.whl (26 kB)
+Downloading glfw-2.10.2-py2.py3-none-manylinux_2_28_x86_64.whl (248 kB)
+Downloading h5py-3.16.0-cp312-cp312-manylinux_2_28_x86_64.whl (5.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.4/5.4 MB 27.6 MB/s eta 0:00:00
+Downloading imageio_ffmpeg-0.6.0-py3-none-manylinux2014_x86_64.whl (29.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 29.5/29.5 MB 18.7 MB/s eta 0:00:00
+Downloading importlib_metadata-9.0.0-py3-none-any.whl (27 kB)
+Downloading ipywidgets-8.1.8-py3-none-any.whl (139 kB)
+Downloading ischedule-1.2.7-py3-none-any.whl (5.3 kB)
+Downloading jupyter_console-6.6.3-py3-none-any.whl (24 kB)
+Downloading jupyterlab-4.6.2-py3-none-any.whl (17.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 17.2/17.2 MB 12.9 MB/s eta 0:00:00
+Downloading jupytext-1.19.5-py3-none-any.whl (229 kB)
+Downloading labmaze-1.0.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (4.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.9/4.9 MB 6.7 MB/s eta 0:00:00
+Downloading lxml-6.1.1-cp312-cp312-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl (5.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.2/5.2 MB 18.0 MB/s eta 0:00:00
+Downloading meshcat-0.3.2-py3-none-any.whl (2.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.6/2.6 MB 14.9 MB/s eta 0:00:00
+Downloading nbconvert-7.17.1-py3-none-any.whl (261 kB)
+Downloading notebook-7.6.1-py3-none-any.whl (5.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.5/5.5 MB 10.4 MB/s eta 0:00:00
+Downloading pycparser-3.0-py3-none-any.whl (48 kB)
+Downloading rhoban_cmeel_jsoncpp-1.9.4.9-0-cp312-cp312-manylinux_2_28_x86_64.whl (362 kB)
+Downloading tensorboard-2.20.0-py3-none-any.whl (5.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.5/5.5 MB 13.9 MB/s eta 0:00:00
+Downloading tensorboardx-2.6.5-py3-none-any.whl (87 kB)
+Downloading typer-0.27.1-py3-none-any.whl (122 kB)
+Downloading uvicorn-0.52.1-py3-none-any.whl (79 kB)
+Downloading aiohappyeyeballs-2.7.1-py3-none-any.whl (15 kB)
+Downloading aiosignal-1.4.0-py3-none-any.whl (7.5 kB)
+Downloading async_lru-2.3.0-py3-none-any.whl (8.4 kB)
+Downloading bleach-6.4.0-py3-none-any.whl (165 kB)
+Downloading cmeel_boost-1.87.0.1-0-cp312-cp312-manylinux_2_28_x86_64.whl (35.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 35.9/35.9 MB 9.3 MB/s eta 0:00:00
+Downloading coal_library-3.0.1-0-cp312-cp312-manylinux_2_28_x86_64.whl (6.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.4/6.4 MB 9.4 MB/s eta 0:00:00
+Downloading frozenlist-1.8.0-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (242 kB)
+Downloading ipython_pygments_lexers-1.1.1-py3-none-any.whl (8.1 kB)
+Downloading jedi-0.20.0-py2.py3-none-any.whl (4.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.9/4.9 MB 22.6 MB/s eta 0:00:00
+Downloading jupyter_builder-1.2.1-py3-none-any.whl (915 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 915.1/915.1 kB 26.3 MB/s eta 0:00:00
+Downloading jupyter_lsp-2.3.1-py3-none-any.whl (77 kB)
+Downloading jupyter_server-2.20.0-py3-none-any.whl (393 kB)
+Downloading jupyterlab_server-2.28.0-py3-none-any.whl (59 kB)
+Downloading jupyterlab_widgets-3.0.16-py3-none-any.whl (914 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 914.9/914.9 kB 26.9 MB/s eta 0:00:00
+Downloading llvmlite-0.48.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (59.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 59.9/59.9 MB 24.2 MB/s eta 0:00:00
+Downloading markdown-3.10.3-py3-none-any.whl (110 kB)
+Downloading markdown_it_py-4.2.0-py3-none-any.whl (91 kB)
+Downloading mistune-3.3.4-py3-none-any.whl (66 kB)
+Downloading multidict-6.7.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (256 kB)
+Downloading nbclient-0.11.0-py3-none-any.whl (25 kB)
+Downloading nbformat-5.10.4-py3-none-any.whl (78 kB)
+Downloading notebook_shim-0.2.4-py3-none-any.whl (13 kB)
+Downloading pandocfilters-1.5.1-py2.py3-none-any.whl (8.7 kB)
+Downloading pexpect-4.9.0-py2.py3-none-any.whl (63 kB)
+Downloading prompt_toolkit-3.0.53-py3-none-any.whl (392 kB)
+Downloading propcache-0.5.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (61 kB)
+Downloading pyngrok-8.1.2-py3-none-any.whl (25 kB)
+Downloading rich-15.0.0-py3-none-any.whl (310 kB)
+Downloading shellingham-1.5.4-py2.py3-none-any.whl (9.8 kB)
+Downloading smmap-5.0.3-py3-none-any.whl (24 kB)
+Downloading stack_data-0.6.3-py3-none-any.whl (24 kB)
+Downloading tensorboard_data_server-0.7.2-py3-none-manylinux_2_31_x86_64.whl (6.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.6/6.6 MB 25.8 MB/s eta 0:00:00
+Downloading u_msgpack_python-2.8.0-py2.py3-none-any.whl (10 kB)
+Downloading werkzeug-3.1.8-py3-none-any.whl (226 kB)
+Downloading widgetsnbextension-4.0.15-py3-none-any.whl (2.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.2/2.2 MB 28.2 MB/s eta 0:00:00
+Downloading yarl-1.24.5-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (109 kB)
+Downloading zipp-4.1.0-py3-none-any.whl (10 kB)
+Downloading beautifulsoup4-4.15.0-py3-none-any.whl (109 kB)
+Downloading defusedxml-0.7.1-py2.py3-none-any.whl (25 kB)
+Downloading etils-1.14.0-py3-none-any.whl (172 kB)
+Downloading jupyterlab_pygments-0.3.0-py3-none-any.whl (15 kB)
+Downloading mdit_py_plugins-0.6.1-py3-none-any.whl (66 kB)
+Downloading argon2_cffi-25.1.0-py3-none-any.whl (14 kB)
+Downloading asttokens-3.0.2-py3-none-any.whl (28 kB)
+Downloading babel-2.18.0-py3-none-any.whl (10.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.2/10.2 MB 24.0 MB/s eta 0:00:00
+Downloading cmeel_assimp-5.4.3.1-0-py3-none-manylinux_2_28_x86_64.whl (14.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.4/14.4 MB 25.6 MB/s eta 0:00:00
+Downloading cmeel_octomap-1.10.0-5-py3-none-manylinux_2_28_x86_64.whl (1.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.1/1.1 MB 31.2 MB/s eta 0:00:00
+Downloading cmeel_qhull-8.0.2.1-1-py3-none-manylinux_2_28_x86_64.whl (3.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.3/3.3 MB 26.8 MB/s eta 0:00:00
+Downloading eigenpy-3.10.3-0-cp312-cp312-manylinux_2_28_x86_64.whl (4.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.9/4.9 MB 11.4 MB/s eta 0:00:00
+Downloading executing-2.2.1-py2.py3-none-any.whl (28 kB)
+Downloading fastjsonschema-2.22.1-py3-none-any.whl (26 kB)
+Downloading json5-0.15.0-py3-none-any.whl (36 kB)
+Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
+Downloading jupyter_events-0.12.1-py3-none-any.whl (19 kB)
+Downloading jupyter_server_terminals-0.5.4-py3-none-any.whl (13 kB)
+Downloading mdurl-0.1.2-py3-none-any.whl (10.0 kB)
+Downloading parso-0.8.7-py2.py3-none-any.whl (107 kB)
+Downloading prometheus_client-0.26.0-py3-none-any.whl (64 kB)
+Downloading ptyprocess-0.7.0-py2.py3-none-any.whl (13 kB)
+Downloading send2trash-2.1.0-py3-none-any.whl (17 kB)
+Downloading soupsieve-2.9.1-py3-none-any.whl (37 kB)
+Downloading terminado-0.18.1-py3-none-any.whl (14 kB)
+Downloading tinycss2-1.5.1-py3-none-any.whl (28 kB)
+Downloading wcwidth-0.8.2-py3-none-any.whl (323 kB)
+Downloading webencodings-0.5.1-py2.py3-none-any.whl (11 kB)
+Downloading pure_eval-0.2.3-py3-none-any.whl (11 kB)
+Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
+Downloading python_json_logger-4.1.0-py3-none-any.whl (15 kB)
+Downloading referencing-0.37.0-py3-none-any.whl (26 kB)
+Downloading rfc3986_validator-0.1.1-py2.py3-none-any.whl (4.2 kB)
+Downloading rpds_py-2026.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (366 kB)
+Downloading argon2_cffi_bindings-25.1.0-cp39-abi3-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl (87 kB)
+Downloading cmeel_zlib-1.3.2-0-py3-none-manylinux_2_28_x86_64.whl (1.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.1/1.1 MB 29.4 MB/s eta 0:00:00
+Downloading rfc3339_validator-0.1.4-py2.py3-none-any.whl (3.5 kB)
+Downloading jsonpointer-3.1.1-py3-none-any.whl (7.7 kB)
+Downloading rfc3987_syntax-1.1.0-py3-none-any.whl (8.0 kB)
+Downloading webcolors-25.10.0-py3-none-any.whl (14 kB)
+Downloading fqdn-1.5.1-py3-none-any.whl (9.1 kB)
+Downloading isoduration-20.11.0-py3-none-any.whl (11 kB)
+Downloading uri_template-1.3.0-py3-none-any.whl (11 kB)
+Downloading arrow-1.4.0-py3-none-any.whl (68 kB)
+Downloading lark-1.3.1-py3-none-any.whl (113 kB)
+Building wheels for collected packages: feetech-servo-sdk, hebi-py, bddl, robomimic, docopt, hf-egl-probe, antlr4-python3-runtime, egl_probe, evdev
+  Building wheel for feetech-servo-sdk (pyproject.toml): started
+  Building wheel for feetech-servo-sdk (pyproject.toml): finished with status 'done'
+  Created wheel for feetech-servo-sdk: filename=feetech_servo_sdk-1.0.0-py3-none-any.whl size=10233 sha256=078c3e0d202c7925a530a304c4daab20afb1de429f142e93631afaf38ac97cc1
+  Stored in directory: /tmp/pip-ephem-wheel-cache-1djy0dnz/wheels/95/6d/02/c7c9a75d82512882464a2772c604307d75b221194706562e28
+  Building wheel for hebi-py (pyproject.toml): started
+  Building wheel for hebi-py (pyproject.toml): finished with status 'done'
+  Created wheel for hebi-py: filename=hebi_py-2.11.0-py3-none-any.whl size=92494767 sha256=8dfc86f234f5c6e0195b0f40af78580026661c9233834b6407671b28ad8b45c6
+  Stored in directory: /tmp/pip-ephem-wheel-cache-1djy0dnz/wheels/d3/6b/cf/b0302ccf441cbd55617c9592e73ad313b8a1813d7699bce55f
+  Building wheel for bddl (pyproject.toml): started
+  Building wheel for bddl (pyproject.toml): finished with status 'done'
+  Created wheel for bddl: filename=bddl-1.0.1-py3-none-any.whl size=212417 sha256=cc247ea6c613b8ccb3c1af8ec7380956bbd89c3245daefb37fa8956ebce09c16
+  Stored in directory: /tmp/pip-ephem-wheel-cache-1djy0dnz/wheels/25/19/b7/769b14830d6e46f7227cfe65f891258b2bcf11f7b6e2e47298
+  Building wheel for robomimic (pyproject.toml): started
+  Building wheel for robomimic (pyproject.toml): finished with status 'done'
+  Created wheel for robomimic: filename=robomimic-0.2.0-py3-none-any.whl size=223311 sha256=098ec2f7d1695ddea685bda1805c722f480af6aef236cf1a3a95ed7726894ac7
+  Stored in directory: /tmp/pip-ephem-wheel-cache-1djy0dnz/wheels/c7/b4/d2/8f4516ff6019000a7b0d8c425bdb40af970524a7463df5c3d6
+  Building wheel for docopt (pyproject.toml): started
+  Building wheel for docopt (pyproject.toml): finished with status 'done'
+  Created wheel for docopt: filename=docopt-0.6.2-py2.py3-none-any.whl size=13782 sha256=9d31f3f411a75688f5acd2b716c9c00dc7a88fd81bedf33d34a70c03189a786e
+  Stored in directory: /tmp/pip-ephem-wheel-cache-1djy0dnz/wheels/1a/bf/a1/4cee4f7678c68c5875ca89eaccf460593539805c3906722228
+  Building wheel for hf-egl-probe (pyproject.toml): started
+  Building wheel for hf-egl-probe (pyproject.toml): finished with status 'error'
+  error: subprocess-exited-with-error
+  
+  × Building wheel for hf-egl-probe (pyproject.toml) did not run successfully.
+  │ exit code: 1
+  ╰─> [377 lines of output]
+      /tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/_distutils/dist.py:288: UserWarning: Unknown distribution option: 'tests_require'
+        warnings.warn(msg)
+      running bdist_wheel
+      running build
+      running build_py
+      creating build/lib.linux-x86_64-cpython-312/egl_probe
+      copying egl_probe/__init__.py -> build/lib.linux-x86_64-cpython-312/egl_probe
+      copying egl_probe/get_available_devices.py -> build/lib.linux-x86_64-cpython-312/egl_probe
+      running egg_info
+      writing hf_egl_probe.egg-info/PKG-INFO
+      writing dependency_links to hf_egl_probe.egg-info/dependency_links.txt
+      writing top-level names to hf_egl_probe.egg-info/top_level.txt
+      reading manifest file 'hf_egl_probe.egg-info/SOURCES.txt'
+      reading manifest template 'MANIFEST.in'
+      adding license file 'LICENSE'
+      writing manifest file 'hf_egl_probe.egg-info/SOURCES.txt'
+      /tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad' to be distributed and are
+              already explicitly excluding 'egl_probe.glad' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      /tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad.EGL' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad.EGL' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad.EGL' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad.EGL' to be distributed and are
+              already explicitly excluding 'egl_probe.glad.EGL' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      /tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad.KHR' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad.KHR' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad.KHR' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad.KHR' to be distributed and are
+              already explicitly excluding 'egl_probe.glad.KHR' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      /tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad.X11' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad.X11' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad.X11' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad.X11' to be distributed and are
+              already explicitly excluding 'egl_probe.glad.X11' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      /tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad.X11.extensions' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad.X11.extensions' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad.X11.extensions' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad.X11.extensions' to be distributed and are
+              already explicitly excluding 'egl_probe.glad.X11.extensions' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      /tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad.glad' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad.glad' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad.glad' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad.glad' to be distributed and are
+              already explicitly excluding 'egl_probe.glad.glad' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      copying egl_probe/CMakeLists.txt -> build/lib.linux-x86_64-cpython-312/egl_probe
+      copying egl_probe/query_devices.cpp -> build/lib.linux-x86_64-cpython-312/egl_probe
+      copying egl_probe/test_device.cpp -> build/lib.linux-x86_64-cpython-312/egl_probe
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad
+      copying egl_probe/glad/egl.cpp -> build/lib.linux-x86_64-cpython-312/egl_probe/glad
+      copying egl_probe/glad/gl.cpp -> build/lib.linux-x86_64-cpython-312/egl_probe/glad
+      copying egl_probe/glad/glx_dyn.cpp -> build/lib.linux-x86_64-cpython-312/egl_probe/glad
+      copying egl_probe/glad/linmath.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad/EGL
+      copying egl_probe/glad/EGL/eglplatform.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/EGL
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad/KHR
+      copying egl_probe/glad/KHR/khrplatform.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/KHR
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/X.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/XKBlib.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xatom.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xfuncproto.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xfuncs.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xlib.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/XlibConf.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xlibint.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xmd.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xosdefs.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xproto.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xprotostr.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xutil.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/cursorfont.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/keysym.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/keysymdef.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/XKB.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/XKBstr.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/XShm.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/Xext.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/extutil.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/shape.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/shapeconst.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/shm.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad/glad
+      copying egl_probe/glad/glad/egl.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/glad
+      copying egl_probe/glad/glad/gl.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/glad
+      copying egl_probe/glad/glad/glx.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/glad
+      warning: build_py: byte-compiling is disabled, skipping.
+      
+      running build_ext
+      Traceback (most recent call last):
+        File "<string>", line 21, in run
+        File "/usr/lib64/python3.12/subprocess.py", line 466, in check_output
+          return run(*popenargs, stdout=PIPE, timeout=timeout, check=True,
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/lib64/python3.12/subprocess.py", line 548, in run
+          with Popen(*popenargs, **kwargs) as process:
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/lib64/python3.12/subprocess.py", line 1026, in __init__
+          self._execute_child(args, executable, preexec_fn, close_fds,
+        File "/usr/lib64/python3.12/subprocess.py", line 1955, in _execute_child
+          raise child_exception_type(errno_num, err_msg, err_filename)
+      FileNotFoundError: [Errno 2] No such file or directory: 'cmake'
+      
+      During handling of the above exception, another exception occurred:
+      
+      Traceback (most recent call last):
+        File "/opt/app-root/lib64/python3.12/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 353, in <module>
+          main()
+        File "/opt/app-root/lib64/python3.12/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 335, in main
+          json_out['return_val'] = hook(**hook_input['kwargs'])
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/opt/app-root/lib64/python3.12/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 251, in build_wheel
+          return _build_backend().build_wheel(wheel_directory, config_settings,
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/build_meta.py", line 441, in build_wheel
+          return _build(['bdist_wheel', '--dist-info-dir', str(metadata_directory)])
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/build_meta.py", line 429, in _build
+          return self._build_with_temp_dir(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/build_meta.py", line 410, in _build_with_temp_dir
+          self.run_setup()
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/build_meta.py", line 520, in run_setup
+          super().run_setup(setup_script=setup_script)
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/build_meta.py", line 317, in run_setup
+          exec(code, locals())
+        File "<string>", line 50, in <module>
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/__init__.py", line 117, in setup
+          return distutils.core.setup(**attrs)  # type: ignore[return-value]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/_distutils/core.py", line 186, in setup
+          return run_commands(dist)
+                 ^^^^^^^^^^^^^^^^^^
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/_distutils/core.py", line 202, in run_commands
+          dist.run_commands()
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/_distutils/dist.py", line 1001, in run_commands
+          self.run_command(cmd)
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/dist.py", line 1107, in run_command
+          super().run_command(command)
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/_distutils/dist.py", line 1020, in run_command
+          cmd_obj.run()
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/command/bdist_wheel.py", line 370, in run
+          self.run_command("build")
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/_distutils/cmd.py", line 341, in run_command
+          self.distribution.run_command(command)
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/dist.py", line 1107, in run_command
+          super().run_command(command)
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/_distutils/dist.py", line 1020, in run_command
+          cmd_obj.run()
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/_distutils/command/build.py", line 135, in run
+          self.run_command(cmd_name)
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/_distutils/cmd.py", line 341, in run_command
+          self.distribution.run_command(command)
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/dist.py", line 1107, in run_command
+          super().run_command(command)
+        File "/tmp/pip-build-env-mt4dv9mq/overlay/lib/python3.12/site-packages/setuptools/_distutils/dist.py", line 1020, in run_command
+          cmd_obj.run()
+        File "<string>", line 23, in run
+      RuntimeError: CMake must be installed.
+      [end of output]
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+  ERROR: Failed building wheel for hf-egl-probe
+  Building wheel for antlr4-python3-runtime (pyproject.toml): started
+  Building wheel for antlr4-python3-runtime (pyproject.toml): finished with status 'done'
+  Created wheel for antlr4-python3-runtime: filename=antlr4_python3_runtime-4.9.3-py3-none-any.whl size=144589 sha256=06ebda761875ab36198aa1f7c27fd3b58516ffc7cb9688919ab5ff7d873f572d
+  Stored in directory: /tmp/pip-ephem-wheel-cache-1djy0dnz/wheels/1f/be/48/13754633f1d08d1fbfc60d5e80ae1e5d7329500477685286cd
+  Building wheel for egl_probe (pyproject.toml): started
+  Building wheel for egl_probe (pyproject.toml): finished with status 'error'
+  error: subprocess-exited-with-error
+  
+  × Building wheel for egl_probe (pyproject.toml) did not run successfully.
+  │ exit code: 1
+  ╰─> [377 lines of output]
+      /tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/_distutils/dist.py:288: UserWarning: Unknown distribution option: 'tests_require'
+        warnings.warn(msg)
+      running bdist_wheel
+      running build
+      running build_py
+      creating build/lib.linux-x86_64-cpython-312/egl_probe
+      copying egl_probe/__init__.py -> build/lib.linux-x86_64-cpython-312/egl_probe
+      copying egl_probe/get_available_devices.py -> build/lib.linux-x86_64-cpython-312/egl_probe
+      running egg_info
+      writing egl_probe.egg-info/PKG-INFO
+      writing dependency_links to egl_probe.egg-info/dependency_links.txt
+      writing top-level names to egl_probe.egg-info/top_level.txt
+      reading manifest file 'egl_probe.egg-info/SOURCES.txt'
+      reading manifest template 'MANIFEST.in'
+      adding license file 'LICENSE'
+      writing manifest file 'egl_probe.egg-info/SOURCES.txt'
+      /tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad' to be distributed and are
+              already explicitly excluding 'egl_probe.glad' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      /tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad.EGL' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad.EGL' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad.EGL' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad.EGL' to be distributed and are
+              already explicitly excluding 'egl_probe.glad.EGL' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      /tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad.KHR' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad.KHR' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad.KHR' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad.KHR' to be distributed and are
+              already explicitly excluding 'egl_probe.glad.KHR' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      /tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad.X11' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad.X11' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad.X11' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad.X11' to be distributed and are
+              already explicitly excluding 'egl_probe.glad.X11' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      /tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad.X11.extensions' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad.X11.extensions' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad.X11.extensions' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad.X11.extensions' to be distributed and are
+              already explicitly excluding 'egl_probe.glad.X11.extensions' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      /tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/command/build_py.py:215: _Warning: Package 'egl_probe.glad.glad' is absent from the `packages` configuration.
+      !!
+      
+              ********************************************************************************
+              ############################
+              # Package would be ignored #
+              ############################
+              Python recognizes 'egl_probe.glad.glad' as an importable package[^1],
+              but it is absent from setuptools' `packages` configuration.
+      
+              This leads to an ambiguous overall configuration. If you want to distribute this
+              package, please make sure that 'egl_probe.glad.glad' is explicitly added
+              to the `packages` configuration field.
+      
+              Alternatively, you can also rely on setuptools' discovery methods
+              (for example by using `find_namespace_packages(...)`/`find_namespace:`
+              instead of `find_packages(...)`/`find:`).
+      
+              You can read more about "package discovery" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/package_discovery.html
+      
+              If you don't want 'egl_probe.glad.glad' to be distributed and are
+              already explicitly excluding 'egl_probe.glad.glad' via
+              `find_namespace_packages(...)/find_namespace` or `find_packages(...)/find`,
+              you can try to use `exclude_package_data`, or `include-package-data=False` in
+              combination with a more fine grained `package-data` configuration.
+      
+              You can read more about "package data files" on setuptools documentation page:
+      
+              - https://setuptools.pypa.io/en/latest/userguide/datafiles.html
+      
+      
+              [^1]: For Python, any directory (with suitable naming) can be imported,
+                    even if it does not contain any `.py` files.
+                    On the other hand, currently there is no concept of package data
+                    directory, all directories are treated like packages.
+              ********************************************************************************
+      
+      !!
+        check.warn(importable)
+      copying egl_probe/CMakeLists.txt -> build/lib.linux-x86_64-cpython-312/egl_probe
+      copying egl_probe/query_devices.cpp -> build/lib.linux-x86_64-cpython-312/egl_probe
+      copying egl_probe/test_device.cpp -> build/lib.linux-x86_64-cpython-312/egl_probe
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad
+      copying egl_probe/glad/egl.cpp -> build/lib.linux-x86_64-cpython-312/egl_probe/glad
+      copying egl_probe/glad/gl.cpp -> build/lib.linux-x86_64-cpython-312/egl_probe/glad
+      copying egl_probe/glad/glx_dyn.cpp -> build/lib.linux-x86_64-cpython-312/egl_probe/glad
+      copying egl_probe/glad/linmath.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad/EGL
+      copying egl_probe/glad/EGL/eglplatform.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/EGL
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad/KHR
+      copying egl_probe/glad/KHR/khrplatform.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/KHR
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/X.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/XKBlib.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xatom.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xfuncproto.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xfuncs.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xlib.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/XlibConf.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xlibint.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xmd.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xosdefs.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xproto.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xprotostr.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/Xutil.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/cursorfont.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/keysym.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      copying egl_probe/glad/X11/keysymdef.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/XKB.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/XKBstr.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/XShm.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/Xext.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/extutil.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/shape.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/shapeconst.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      copying egl_probe/glad/X11/extensions/shm.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/X11/extensions
+      creating build/lib.linux-x86_64-cpython-312/egl_probe/glad/glad
+      copying egl_probe/glad/glad/egl.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/glad
+      copying egl_probe/glad/glad/gl.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/glad
+      copying egl_probe/glad/glad/glx.h -> build/lib.linux-x86_64-cpython-312/egl_probe/glad/glad
+      warning: build_py: byte-compiling is disabled, skipping.
+      
+      running build_ext
+      Traceback (most recent call last):
+        File "<string>", line 21, in run
+        File "/usr/lib64/python3.12/subprocess.py", line 466, in check_output
+          return run(*popenargs, stdout=PIPE, timeout=timeout, check=True,
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/lib64/python3.12/subprocess.py", line 548, in run
+          with Popen(*popenargs, **kwargs) as process:
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/lib64/python3.12/subprocess.py", line 1026, in __init__
+          self._execute_child(args, executable, preexec_fn, close_fds,
+        File "/usr/lib64/python3.12/subprocess.py", line 1955, in _execute_child
+          raise child_exception_type(errno_num, err_msg, err_filename)
+      FileNotFoundError: [Errno 2] No such file or directory: 'cmake'
+      
+      During handling of the above exception, another exception occurred:
+      
+      Traceback (most recent call last):
+        File "/opt/app-root/lib64/python3.12/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 353, in <module>
+          main()
+        File "/opt/app-root/lib64/python3.12/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 335, in main
+          json_out['return_val'] = hook(**hook_input['kwargs'])
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/opt/app-root/lib64/python3.12/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 251, in build_wheel
+          return _build_backend().build_wheel(wheel_directory, config_settings,
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/build_meta.py", line 441, in build_wheel
+          return _build(['bdist_wheel', '--dist-info-dir', str(metadata_directory)])
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/build_meta.py", line 429, in _build
+          return self._build_with_temp_dir(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/build_meta.py", line 410, in _build_with_temp_dir
+          self.run_setup()
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/build_meta.py", line 520, in run_setup
+          super().run_setup(setup_script=setup_script)
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/build_meta.py", line 317, in run_setup
+          exec(code, locals())
+        File "<string>", line 50, in <module>
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/__init__.py", line 117, in setup
+          return distutils.core.setup(**attrs)  # type: ignore[return-value]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/_distutils/core.py", line 186, in setup
+          return run_commands(dist)
+                 ^^^^^^^^^^^^^^^^^^
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/_distutils/core.py", line 202, in run_commands
+          dist.run_commands()
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/_distutils/dist.py", line 1001, in run_commands
+          self.run_command(cmd)
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/dist.py", line 1107, in run_command
+          super().run_command(command)
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/_distutils/dist.py", line 1020, in run_command
+          cmd_obj.run()
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/command/bdist_wheel.py", line 370, in run
+          self.run_command("build")
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/_distutils/cmd.py", line 341, in run_command
+          self.distribution.run_command(command)
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/dist.py", line 1107, in run_command
+          super().run_command(command)
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/_distutils/dist.py", line 1020, in run_command
+          cmd_obj.run()
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/_distutils/command/build.py", line 135, in run
+          self.run_command(cmd_name)
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/_distutils/cmd.py", line 341, in run_command
+          self.distribution.run_command(command)
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/dist.py", line 1107, in run_command
+          super().run_command(command)
+        File "/tmp/pip-build-env-ojfn0u4o/overlay/lib/python3.12/site-packages/setuptools/_distutils/dist.py", line 1020, in run_command
+          cmd_obj.run()
+        File "<string>", line 23, in run
+      RuntimeError: CMake must be installed.
+      [end of output]
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+  ERROR: Failed building wheel for egl_probe
+  Building wheel for evdev (pyproject.toml): started
+  Building wheel for evdev (pyproject.toml): finished with status 'done'
+  Created wheel for evdev: filename=evdev-1.9.3-cp312-cp312-linux_x86_64.whl size=115647 sha256=e9c4ad297eefc52eeec650d6bec80372c09c489e0f6e9b3024ccc512b6c7686b
+  Stored in directory: /tmp/pip-ephem-wheel-cache-1djy0dnz/wheels/76/fc/3d/3eed8d918241316fdd8512e3328a1906138f58304b790b135f
+Successfully built feetech-servo-sdk hebi-py bddl robomimic docopt antlr4-python3-runtime evdev
+Failed to build hf-egl-probe egl_probe
+ERROR: ERROR: Failed to build installable wheels for some pyproject.toml based projects (hf-egl-probe, egl_probe)
+Error: building at STEP "RUN set -eux;     python -m pip install       --extra-index-url "${PYTORCH_INDEX_URL}"       "torch==${TORCH_VERSION}"       "torchvision==${TORCHVISION_VERSION}"       "lerobot[${LEROBOT_EXTRAS}]==${LEROBOT_VERSION}";     python -m pip install       --force-reinstall       --no-deps       --index-url "${PYTORCH_INDEX_URL}"       "torchcodec==${TORCHCODEC_VERSION}";     python -m pip install       --no-deps       "${NVIDIA_NPP_PACKAGE}==${NVIDIA_NPP_VERSION}";     find "$(python -c 'import sys; print(sys.prefix)')"       -type f       -path '*/triton/backends/nvidia/bin/ptxas'       -exec chmod +x {} +;     SITE_PACKAGES="$(python -c 'import site; print(site.getsitepackages()[0])')";     test -d "${SITE_PACKAGES}/nvidia/npp/lib";     printf '%s\n' "${SITE_PACKAGES}/nvidia/npp/lib"       > /etc/ld.so.conf.d/nvidia-npp-python.conf;     find "${SITE_PACKAGES}/nvidia/npp/lib"       -maxdepth 1       -type f       -name 'libnpp*.so*'       -print;     ldconfig;     NPP_CUDA_MAJOR="${NVIDIA_NPP_PACKAGE##*-cu}";     ldconfig -p | grep "libnppicc.so.${NPP_CUDA_MAJOR}";     TORCH_VERSION="${TORCH_VERSION}"     TORCHVISION_VERSION="${TORCHVISION_VERSION}"     LEROBOT_VERSION="${LEROBOT_VERSION}"     TORCHCODEC_VERSION="${TORCHCODEC_VERSION}"     python - <<'PYVERIFY'": while running runtime: exit status 1
+
