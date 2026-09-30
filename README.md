@@ -226,10 +226,12 @@ oc process -f ./k8s/download-job-template.yaml \
 
 ## 11. Run fine-tuning job
 ## hint: CAMERA_MAP = {camera_name_from_dataset : camera_name_expected_by_VLA_model}
+## hint: OUTPUT_MODEL_REPO_ID = <huggingface-repo to publish resulted chekpoint>
 
 ```bash
 oc process -f ./k8s/training-job-template.yaml \
   -p MODEL_REPO_ID=lerobot/pi05_base \
+  -p OUTPUT_MODEL_REPO_ID=execbat/pi05-robot-finetuned \
   -p DATASET_REPO_ID=lerobot/libero \
   -p CAMERA_MAP='{"observation.images.image":"observation.images.base_0_rgb","observation.images.image2":"observation.images.left_wrist_0_rgb"}' \
   | oc create -f -

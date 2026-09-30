@@ -85,7 +85,10 @@ objects:
                 value: "1"
 
               - name: MODEL_REPO_ID
-                value: '${MODEL_REPO_ID}'
+                value: '${MODEL_REPO_ID}'                
+
+              - name: OUTPUT_MODEL_REPO_ID
+                value: '${OUTPUT_MODEL_REPO_ID}'                
 
               - name: DATASET_REPO_ID
                 value: '${DATASET_REPO_ID}'
@@ -738,7 +741,7 @@ objects:
                   secretKeyRef:
                     name: huggingface-credentials
                     key: token
-                    optional: true
+                    optional: false
 
             command:
               - /bin/bash
@@ -1009,7 +1012,8 @@ objects:
                   --batch_size="${BATCH_SIZE}"
                   --num_workers="${NUM_WORKERS}"
                   --save_checkpoint=true
-                  --policy.push_to_hub=false
+                  --policy.repo_id="${OUTPUT_MODEL_REPO_ID}"
+                  --policy.push_to_hub=true
                   --wandb.enable=false
                 )
 
@@ -1021,6 +1025,19 @@ objects:
                 # if-condition does not trigger -e, whereas checking $? on a
                 # separate line after the command would have already exited
                 # the script on failure before that line ever ran.
+                if [[ -z "${OUTPUT_MODEL_REPO_ID:-}" ]]; then
+                  echo "OUTPUT_MODEL_REPO_ID is empty" >&2
+                  exit 1
+                fi
+
+                if [[ -z "${HF_TOKEN:-}" ]]; then
+                  echo "HF_TOKEN is empty; cannot push fine-tuned model to Hugging Face Hub" >&2
+                  exit 1
+                fi
+
+                echo "Fine-tuned model will be published to:"
+                echo "  https://huggingface.co/${OUTPUT_MODEL_REPO_ID}"
+                
                 if lerobot-train "${TRAIN_ARGS[@]}"; then
                   echo "lerobot-train completed successfully"
                 else
@@ -1039,6 +1056,7 @@ objects:
                 # dated run folder.
                 DATASET_ROOT="${DATASET_ROOT}" \
                 MODEL_DIR="${MODEL_DIR}" \
+                OUTPUT_MODEL_REPO_ID="${OUTPUT_MODEL_REPO_ID}" \
                 RUN_ID="${RUN_ID}" \
                 RUN_OUTPUT_DIR="${RUN_OUTPUT_DIR}" \
                 RENAME_MAP="${RENAME_MAP}" \
@@ -1064,15 +1082,23 @@ objects:
                 metadata = {
                     "run_id": os.environ["RUN_ID"],
                     "finetuned_at_utc": datetime.now(timezone.utc).isoformat(),
+
                     "base_model": {
                         "repo_id": os.environ["MODEL_REPO_ID"],
                         "path": os.environ["MODEL_DIR"],
                     },
+
+                    "output_model": {
+                        "repo_id": os.environ["OUTPUT_MODEL_REPO_ID"],
+                        "hub_url": f"https://huggingface.co/{os.environ['OUTPUT_MODEL_REPO_ID']}",
+                    },
+
                     "dataset": {
                         "repo_id": os.environ["DATASET_REPO_ID"],
                         "root": os.environ["DATASET_ROOT"],
                         "format_version": dataset_format,
                     },
+
                     "dataset_camera_map_preflight": json.loads(os.environ["RENAME_MAP"]),
                     "policy_empty_cameras": int(os.environ["POLICY_EMPTY_CAMERAS"]),
                     "train_command": os.environ["TRAIN_COMMAND"],
@@ -1155,6 +1181,13 @@ parameters:
       Must already be downloaded to pvc-base-models by
       download-job-template.yaml.
     value: lerobot/pi05_base
+    required: true
+
+  - name: OUTPUT_MODEL_REPO_ID
+    displayName: Fine-tuned model output repo ID
+    description: >-
+      Hugging Face model repository where the final fine-tuned policy
+      will be published, e.g. execbat/pi05-robot-finetuned.
     required: true
 
   - name: DATASET_REPO_ID
