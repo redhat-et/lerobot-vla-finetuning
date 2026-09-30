@@ -87,9 +87,6 @@ objects:
               - name: MODEL_REPO_ID
                 value: '${MODEL_REPO_ID}'                
 
-              - name: OUTPUT_MODEL_REPO_ID
-                value: '${OUTPUT_MODEL_REPO_ID}'                
-
               - name: DATASET_REPO_ID
                 value: '${DATASET_REPO_ID}'
 
@@ -696,6 +693,9 @@ objects:
               # BASE_MODELS_ROOT/MODEL_DIR below).
               - name: MODEL_REPO_ID
                 value: '${MODEL_REPO_ID}'
+                
+              - name: OUTPUT_MODEL_REPO_ID
+                value: '${OUTPUT_MODEL_REPO_ID}'  
 
               # Mount path of the base-models PVC (must match this
               # container's volumeMounts below). MODEL_DIR's path relative
@@ -915,6 +915,7 @@ objects:
                     "gradient_checkpointing",
                     "dtype",
                     "device",
+                    "repo_id",
                     "push_to_hub",
                 }
 
@@ -993,6 +994,19 @@ objects:
                 # used here and the ones logged into the metadata file below
                 # are guaranteed to be the exact same list, not a
                 # hand-reconstructed guess.
+                if [[ -z "${OUTPUT_MODEL_REPO_ID:-}" ]]; then
+                  echo "OUTPUT_MODEL_REPO_ID is empty" >&2
+                  exit 1
+                fi
+
+                if [[ -z "${HF_TOKEN:-}" ]]; then
+                  echo "HF_TOKEN is empty; cannot push fine-tuned model to Hugging Face Hub" >&2
+                  exit 1
+                fi
+
+                echo "Fine-tuned model will be published to:"
+                echo "  https://huggingface.co/${OUTPUT_MODEL_REPO_ID}"                
+                
                 TRAIN_ARGS=(
                   --dataset.repo_id="${DATASET_REPO_ID}"
                   --dataset.root="${DATASET_ROOT}"
@@ -1025,18 +1039,7 @@ objects:
                 # if-condition does not trigger -e, whereas checking $? on a
                 # separate line after the command would have already exited
                 # the script on failure before that line ever ran.
-                if [[ -z "${OUTPUT_MODEL_REPO_ID:-}" ]]; then
-                  echo "OUTPUT_MODEL_REPO_ID is empty" >&2
-                  exit 1
-                fi
 
-                if [[ -z "${HF_TOKEN:-}" ]]; then
-                  echo "HF_TOKEN is empty; cannot push fine-tuned model to Hugging Face Hub" >&2
-                  exit 1
-                fi
-
-                echo "Fine-tuned model will be published to:"
-                echo "  https://huggingface.co/${OUTPUT_MODEL_REPO_ID}"
                 
                 if lerobot-train "${TRAIN_ARGS[@]}"; then
                   echo "lerobot-train completed successfully"
